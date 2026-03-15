@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
+import sys
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -35,6 +37,7 @@ from copenclaw.core.policy import ExecutionPolicy, load_execution_policy
 from copenclaw.core.scheduler import Scheduler
 from copenclaw.core.task_events import TaskEventRegistry
 from copenclaw.core.tasks import TaskManager, _now
+from copenclaw.core.templates import continuous_task_template
 from copenclaw.core.worker import WorkerPool
 from copenclaw.integrations.telegram import TelegramAdapter
 from copenclaw.integrations.teams import TeamsAdapter
@@ -55,6 +58,11 @@ _CI_DIRECTION_GUIDANCE = {
     "observability": "Improve logs, metrics, and diagnosis signals for faster debugging.",
     "docs": "Improve operator/developer documentation for maintainability and handoff.",
 }
+_DEFAULT_CONTINUOUS_TASK_GUIDANCE = (
+    "Review the current design deeply, research comparable products and relevant academic/industry references, "
+    "model realistic user scenarios, and select the highest-impact next feature/capability to implement."
+)
+_SUPERVISOR_AUTO_FINALIZE_ASSESSMENT_THRESHOLD = 10
 
 
 def _is_image_path(path: str) -> bool:
@@ -123,27 +131,6 @@ INFRA_TOOLS = [
                 "service_url": {"type": "string", "description": "Required for Teams"},
             },
             "required": ["channel", "target"],
-        },
-    },
-    {
-        "name": "files_read",
-        "description": "Read a file from the data directory.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"path": {"type": "string"}},
-            "required": ["path"],
-        },
-    },
-    {
-        "name": "files_write",
-        "description": "Write content to a file within a task's workspace or the data directory. Creates parent directories as needed.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "File path (relative to data_dir, or absolute within allowed dirs)"},
-                "content": {"type": "string", "description": "File content to write"},
-            },
-            "required": ["path", "content"],
         },
     },
     {
@@ -216,10 +203,11 @@ TASK_TOOLS = [
                 "service_url": {"type": "string", "description": "Required for Teams"},
                 "check_interval": {"type": "integer", "default": 600, "description": "Supervisor check interval in seconds"},
                 "auto_supervise": {"type": "boolean", "default": True, "description": "Whether to auto-start a supervisor"},
-                "supervisor_instructions": {"type": "string", "description": "What the supervisor should watch for"},
-                "task_type": {"type": "string", "enum": ["standard", "continuous_improvement"], "default": "standard"},
+                "task_type": {"type": "string", "enum": ["standard", "continuous_improvement", "continuous_task"], "default": "standard"},
                 "continuous": {"type": "object", "description": "Continuous improvement configuration when task_type=continuous_improvement"},
                 "on_complete": {"type": "string", "description": "A prompt to feed to the orchestrator when this task finishes (success, failure, or cancellation). Use this for chaining tasks or retrying on failure. The hook prompt includes the terminal reason so the orchestrator can react appropriately."},
+                "continuous_task": {"type": "boolean", "default": False, "description": "When true, auto-builds a continuous-task on_complete hook that researches and dispatches the next follow-up task automatically."},
+                "continuous_prompt": {"type": "string", "description": "Optional user-specific guidance to shape the generated continuous-task hook prompt."},
             },
             "required": ["prompt", "plan"],
         },
@@ -248,9 +236,11 @@ TASK_TOOLS = [
                 "service_url": {"type": "string", "description": "Required for Teams"},
                 "check_interval": {"type": "integer", "default": 600, "description": "Supervisor check interval in seconds"},
                 "auto_supervise": {"type": "boolean", "default": True, "description": "Whether to auto-start a supervisor"},
-                "task_type": {"type": "string", "enum": ["standard", "continuous_improvement"], "default": "standard"},
+                "task_type": {"type": "string", "enum": ["standard", "continuous_improvement", "continuous_task"], "default": "standard"},
                 "continuous": {"type": "object", "description": "Continuous improvement configuration when task_type=continuous_improvement"},
                 "on_complete": {"type": "string", "description": "A prompt to feed to the orchestrator when this task finishes (success, failure, or cancellation)."},
+                "continuous_task": {"type": "boolean", "default": False, "description": "When true, auto-builds a continuous-task on_complete hook that researches and dispatches the next follow-up task automatically."},
+                "continuous_prompt": {"type": "string", "description": "Optional user-specific guidance to shape the generated continuous-task hook prompt."},
             },
             "required": ["prompt"],
         },
@@ -299,7 +289,6 @@ TASK_TOOLS = [
                 "task_id": {"type": "string"},
                 "msg_type": {"type": "string", "enum": ["instruction", "input", "pause", "resume", "redirect", "cancel", "priority"]},
                 "content": {"type": "string", "description": "The message content — for stopped tasks, this becomes the continuation prompt"},
-                "supervisor_instructions": {"type": "string", "description": "Updated supervisor instructions (optional, applied on resume)"},
             },
             "required": ["task_id", "msg_type", "content"],
         },
@@ -379,6 +368,15 @@ TASK_TOOLS = [
                 "task_id": {"type": "string"},
                 "tail": {"type": "integer", "default": 50},
             },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "task_process_info",
+        "description": "Inspect worker process tree details (CPU/memory/children/command lines). Supervisor only.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}},
             "required": ["task_id"],
         },
     },
@@ -656,10 +654,6 @@ class MCPProtocolHandler:
             return self._tool_jobs_clear_all(args)
         if name == "send_message":
             return self._tool_send_message(args)
-        if name == "files_read":
-            return self._tool_files_read(args)
-        if name == "files_write":
-            return self._tool_files_write(args)
         if name == "audit_read":
             return self._tool_audit_read(args)
         # MCP server management tools
@@ -702,6 +696,8 @@ class MCPProtocolHandler:
             return self._tool_task_get_context(args)
         if name == "task_read_peer":
             return self._tool_task_read_peer(args)
+        if name == "task_process_info":
+            return self._tool_task_process_info(args)
         if name == "task_send_input":
             return self._tool_task_send_input(args)
         raise ValueError(f"Unknown tool: {name}")
@@ -870,42 +866,6 @@ class MCPProtocolHandler:
             return {"status": "sent", "channel": "slack"}
         raise ValueError(f"Unsupported channel: {channel}")
 
-    def _tool_files_read(self, args: dict[str, Any]) -> dict:
-        if not self.data_dir:
-            raise ValueError("data_dir not configured")
-        base = os.path.abspath(self.data_dir)
-        path = args["path"]
-        if not os.path.isabs(path):
-            path = os.path.join(base, path)
-        target = os.path.abspath(path)
-        if not target.startswith(base):
-            raise PermissionError("Path is outside allowed data_dir")
-        if not os.path.exists(target):
-            raise FileNotFoundError(f"File not found: {path}")
-        with open(target, "r", encoding="utf-8") as f:
-            return {"content": f.read()}
-
-    def _tool_files_write(self, args: dict[str, Any]) -> dict:
-        """Write content to a file. Relative paths resolve against data_dir."""
-        if not self.data_dir:
-            raise ValueError("data_dir not configured")
-        base = os.path.abspath(self.data_dir)
-        path = args["path"]
-        if not os.path.isabs(path):
-            path = os.path.join(base, path)
-        target = os.path.abspath(path)
-        # Warn (but allow) writes outside data_dir to preserve backward compatibility.
-        if not target.startswith(base):
-            logger.warning("files_write: path outside data_dir: %s", target)
-        # Create parent directories
-        parent = os.path.dirname(target)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        with open(target, "w", encoding="utf-8") as f:
-            f.write(args["content"])
-        self._audit("files.write", {"path": target, "size": len(args["content"])})
-        return {"status": "written", "path": target, "size": len(args["content"])}
-
     def _tool_audit_read(self, args: dict[str, Any]) -> dict:
         if not self.data_dir:
             raise ValueError("data_dir not configured")
@@ -1047,12 +1007,36 @@ class MCPProtocolHandler:
             target = self.owner_chat_id
         return channel, target
 
+    def _is_continuous_task_requested(self, args: dict[str, Any]) -> bool:
+        task_type = str(args.get("task_type", "standard")).strip().lower()
+        return bool(args.get("continuous_task")) or task_type == "continuous_task"
+
+    def _resolve_task_type(self, args: dict[str, Any]) -> str:
+        task_type = str(args.get("task_type", "standard")).strip().lower()
+        if task_type in {"continuous", "continuous_task"}:
+            return "continuous_task"
+        return task_type or "standard"
+
+    def _build_continuous_task_hook(self, task_prompt: str, user_guidance: str) -> str:
+        guidance = (user_guidance or "").strip() or _DEFAULT_CONTINUOUS_TASK_GUIDANCE
+        return continuous_task_template(task_prompt=task_prompt, user_guidance=guidance)
+
     def _tool_tasks_propose(self, args: dict[str, Any]) -> dict:
         """Create a proposal that the user must approve before workers are spawned."""
         tm = self._require_task_manager()
 
         channel, target = self._resolve_channel_target(args)
         name = args.get("name") or generate_name()
+        task_prompt = args["prompt"]
+        continuous_task_enabled = self._is_continuous_task_requested(args)
+        continuous_prompt_text = ""
+        on_complete_hook = (args.get("on_complete") or "").strip()
+        if continuous_task_enabled:
+            continuous_prompt_text = self._build_continuous_task_hook(
+                task_prompt=task_prompt,
+                user_guidance=(args.get("continuous_prompt") or on_complete_hook or ""),
+            )
+            on_complete_hook = continuous_prompt_text
 
         # Guard: reject duplicate task names that are still active/proposed
         existing = tm.list_tasks()
@@ -1066,10 +1050,9 @@ class MCPProtocolHandler:
 
         task = tm.create_task(
             name=name,
-            prompt=args["prompt"],
+            prompt=task_prompt,
             plan=args.get("plan", ""),
-            supervisor_instructions=args.get("supervisor_instructions", ""),
-            task_type=args.get("task_type", "standard"),
+            task_type=self._resolve_task_type(args),
             ci_config=args.get("continuous"),
             channel=channel,
             target=target,
@@ -1079,9 +1062,8 @@ class MCPProtocolHandler:
             status="proposed",
         )
 
-        # Set on_complete hook if provided
-        if args.get("on_complete"):
-            task.on_complete = args["on_complete"]
+        if on_complete_hook:
+            task.on_complete = on_complete_hook
             tm._save()
 
         if self.data_dir:
@@ -1091,7 +1073,6 @@ class MCPProtocolHandler:
                 "prompt": task.prompt,
                 "plan": getattr(task, "plan", None),
                 "auto_supervise": task.auto_supervise,
-                "supervisor_instructions": getattr(task, "supervisor_instructions", None),
                 "channel": getattr(task, "channel", ""),
                 "target": getattr(task, "target", ""),
                 "task_type": getattr(task, "task_type", "standard"),
@@ -1109,6 +1090,8 @@ class MCPProtocolHandler:
             "plan": task.plan,
             "auto_supervise": task.auto_supervise,
             "task_type": task.task_type,
+            "continuous_task": continuous_task_enabled,
+            "continuous_prompt": continuous_prompt_text,
             "message": "Proposal sent to user. Waiting for approval.",
         }
 
@@ -1132,10 +1115,21 @@ class MCPProtocolHandler:
 
         channel, target = self._resolve_channel_target(args)
         name = args.get("name") or generate_name()
+        task_prompt = args["prompt"]
+        continuous_task_enabled = self._is_continuous_task_requested(args)
+        continuous_prompt_text = ""
+        on_complete_hook = (args.get("on_complete") or "").strip()
+        if continuous_task_enabled:
+            continuous_prompt_text = self._build_continuous_task_hook(
+                task_prompt=task_prompt,
+                user_guidance=(args.get("continuous_prompt") or on_complete_hook or ""),
+            )
+            on_complete_hook = continuous_prompt_text
+
         task = tm.create_task(
             name=name,
-            prompt=args["prompt"],
-            task_type=args.get("task_type", "standard"),
+            prompt=task_prompt,
+            task_type=self._resolve_task_type(args),
             ci_config=args.get("continuous"),
             channel=channel,
             target=target,
@@ -1144,9 +1138,8 @@ class MCPProtocolHandler:
             auto_supervise=args.get("auto_supervise", True),
         )
 
-        # Set on_complete hook if provided
-        if args.get("on_complete"):
-            task.on_complete = args["on_complete"]
+        if on_complete_hook:
+            task.on_complete = on_complete_hook
             tm._save()
 
         if self.data_dir:
@@ -1161,7 +1154,11 @@ class MCPProtocolHandler:
                 "task_type": getattr(task, "task_type", "standard"),
             })
 
-        return self._start_task(task)
+        result = self._start_task(task)
+        if continuous_task_enabled:
+            result["continuous_task"] = True
+            result["continuous_prompt"] = continuous_prompt_text
+        return result
 
     def _build_worker_callbacks(self, tm: TaskManager, pool: WorkerPool):
         # Callbacks for worker lifecycle
@@ -1326,6 +1323,124 @@ class MCPProtocolHandler:
             "active_pids": active_pids,
         }
 
+    def _collect_process_metrics(self, pids: list[int]) -> list[dict[str, Any]]:
+        unique_pids = sorted({int(pid) for pid in pids if isinstance(pid, int) and pid > 0})
+        if not unique_pids:
+            return []
+        if sys.platform == "win32":
+            return self._collect_process_metrics_windows(unique_pids)
+        return self._collect_process_metrics_unix(unique_pids)
+
+    def _collect_process_metrics_windows(self, pids: list[int]) -> list[dict[str, Any]]:
+        pid_expr = ",".join(str(pid) for pid in pids)
+        command = (
+            "$pidList = @(" + pid_expr + ")\n"
+            "$procs = Get-CimInstance Win32_Process | Where-Object { $pidList -contains [int]$_.ProcessId }\n"
+            "$cpuRows = Get-CimInstance Win32_PerfFormattedData_PerfProc_Process | "
+            "Where-Object { $pidList -contains [int]$_.IDProcess }\n"
+            "$cpuByPid = @{}\n"
+            "foreach ($row in $cpuRows) { $cpuByPid[[int]$row.IDProcess] = [double]$row.PercentProcessorTime }\n"
+            "$out = @()\n"
+            "foreach ($proc in $procs) {\n"
+            "  $pid = [int]$proc.ProcessId\n"
+            "  $out += [pscustomobject]@{\n"
+            "    pid = $pid\n"
+            "    parent_pid = [int]$proc.ParentProcessId\n"
+            "    name = [string]$proc.Name\n"
+            "    command_line = if ($null -ne $proc.CommandLine) { [string]$proc.CommandLine } else { \"\" }\n"
+            "    cpu_percent = if ($cpuByPid.ContainsKey($pid)) { [double]$cpuByPid[$pid] } else { $null }\n"
+            "    memory_rss_bytes = if ($null -ne $proc.WorkingSetSize) { [int64]$proc.WorkingSetSize } else { $null }\n"
+            "    memory_private_bytes = if ($null -ne $proc.PrivatePageCount) { [int64]$proc.PrivatePageCount } else { $null }\n"
+            "  }\n"
+            "}\n"
+            "$out | ConvertTo-Json -Depth 4 -Compress\n"
+        )
+        try:
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", command],
+                capture_output=True,
+                text=True,
+                timeout=6,
+                check=False,
+            )
+            if proc.returncode != 0:
+                return []
+            raw = (proc.stdout or "").strip()
+            if not raw:
+                return []
+            parsed = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            return []
+        rows = parsed if isinstance(parsed, list) else [parsed]
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            pid = row.get("pid")
+            if not isinstance(pid, int):
+                continue
+            parent_pid = row.get("parent_pid")
+            cpu_percent = row.get("cpu_percent")
+            memory_rss = row.get("memory_rss_bytes")
+            memory_private = row.get("memory_private_bytes")
+            results.append({
+                "pid": pid,
+                "parent_pid": parent_pid if isinstance(parent_pid, int) else None,
+                "name": str(row.get("name") or ""),
+                "command_line": str(row.get("command_line") or ""),
+                "cpu_percent": float(cpu_percent) if isinstance(cpu_percent, (int, float)) else None,
+                "memory_rss_bytes": int(memory_rss) if isinstance(memory_rss, (int, float)) else None,
+                "memory_private_bytes": int(memory_private) if isinstance(memory_private, (int, float)) else None,
+            })
+        return results
+
+    def _collect_process_metrics_unix(self, pids: list[int]) -> list[dict[str, Any]]:
+        pid_expr = ",".join(str(pid) for pid in pids)
+        try:
+            proc = subprocess.run(
+                ["ps", "-o", "pid=,ppid=,%cpu=,rss=,comm=,args=", "-p", pid_expr],
+                capture_output=True,
+                text=True,
+                timeout=6,
+                check=False,
+            )
+            if proc.returncode != 0:
+                return []
+        except Exception:  # noqa: BLE001
+            return []
+        results: list[dict[str, Any]] = []
+        for line in (proc.stdout or "").splitlines():
+            parts = line.strip().split(None, 5)
+            if len(parts) < 5:
+                continue
+            try:
+                pid = int(parts[0])
+                parent_pid = int(parts[1])
+            except ValueError:
+                continue
+            cpu_percent: float | None = None
+            memory_rss_bytes: int | None = None
+            try:
+                cpu_percent = float(parts[2])
+            except ValueError:
+                cpu_percent = None
+            try:
+                memory_rss_bytes = int(parts[3]) * 1024
+            except ValueError:
+                memory_rss_bytes = None
+            name = parts[4]
+            command_line = parts[5] if len(parts) >= 6 else name
+            results.append({
+                "pid": pid,
+                "parent_pid": parent_pid,
+                "name": name,
+                "command_line": command_line,
+                "cpu_percent": cpu_percent,
+                "memory_rss_bytes": memory_rss_bytes,
+                "memory_private_bytes": None,
+            })
+        return results
+
     def _start_task(self, task: Any) -> dict:
         """Start a task's worker (and supervisor). Used by both approve and create."""
         tm = self._require_task_manager()
@@ -1365,7 +1480,6 @@ class MCPProtocolHandler:
                 worker_session_id=None,
                 check_interval=task.check_interval,
                 on_output=on_supervisor_output,
-                supervisor_instructions=getattr(task, "supervisor_instructions", ""),
                 working_dir=task.working_dir,
                 task_manager=tm,
             )
@@ -1482,7 +1596,6 @@ class MCPProtocolHandler:
             "supervisor_session_id": task.supervisor_session_id,
             "timeline": task.concise_timeline(limit),
             "pending_inbox": len([m for m in task.inbox if not m.acknowledged]),
-            "worker_pid": process_state.get("pid"),
             "worker_child_processes": len(process_state.get("child_pids", [])),
             "worker_process_running": bool(process_state.get("running")),
         }
@@ -1558,13 +1671,6 @@ class MCPProtocolHandler:
         terminal_states = {"completed", "failed", "cancelled"}
         if task.status in terminal_states and msg_type in ("instruction", "redirect"):
             pool = self._require_worker_pool()
-
-            # Update supervisor_instructions if provided
-            new_sup_instructions = args.get("supervisor_instructions")
-            if new_sup_instructions:
-                task.supervisor_instructions = new_sup_instructions
-                task.updated_at = _now()
-                tm._save()
 
             # Build continuation prompt referencing original task + new instructions
             continuation_prompt = (
@@ -1689,20 +1795,28 @@ class MCPProtocolHandler:
                 can_complete = task.completion_deferred or not worker_running
 
                 # STUCK-ASSESSMENT DETECTION: If the worker is dead and the
-                # supervisor has assessed 2+ times without finalizing, force
-                # completion (unless there are strong negative signals).
+                # supervisor has assessed 10+ times without finalizing, force
+                # finalization so tasks cannot remain limbo.
                 force_complete = False
+                force_fail = False
                 if (report_type == "assessment"
                         and can_complete
                         and not worker_running
-                        and task.supervisor_assessment_count >= 2
-                        and not strong_negative):
-                    logger.warning(
-                        "STUCK-ASSESSMENT: Supervisor assessed task %s %d times without "
-                        "finalizing (worker dead). Auto-completing.",
-                        task_id, task.supervisor_assessment_count,
-                    )
-                    force_complete = True
+                        and task.supervisor_assessment_count >= _SUPERVISOR_AUTO_FINALIZE_ASSESSMENT_THRESHOLD):
+                    if strong_negative:
+                        logger.warning(
+                            "STUCK-ASSESSMENT: Supervisor assessed task %s %d times without "
+                            "finalizing (worker dead). Auto-failing.",
+                            task_id, task.supervisor_assessment_count,
+                        )
+                        force_fail = True
+                    else:
+                        logger.warning(
+                            "STUCK-ASSESSMENT: Supervisor assessed task %s %d times without "
+                            "finalizing (worker dead). Auto-completing.",
+                            task_id, task.supervisor_assessment_count,
+                        )
+                        force_complete = True
 
                 if can_complete and (report_type == "completed" or force_complete or (report_type == "assessment" and positive and not strong_negative)):
                     report_type = "completed"
@@ -1720,6 +1834,16 @@ class MCPProtocolHandler:
 
                     if self.worker_pool:
                         self.worker_pool.request_supervisor_check(task_id)
+                elif can_complete and force_fail:
+                    report_type = "failed"
+                    args["summary"] = f"Auto-finalized as failed after {task.supervisor_assessment_count} assessments: {summary_text}".strip()
+                    task.completion_deferred = False
+                    task.completion_deferred_at = None
+                    task.completion_deferred_summary = ""
+                    task.completion_deferred_detail = ""
+                    task.supervisor_assessment_count = 0  # reset counter
+                    task.updated_at = _now()
+                    tm._save()
 
         # If a WORKER reports "completed" and there's an active supervisor,
         # defer completion — let the supervisor verify the outcome first
@@ -1978,6 +2102,63 @@ class MCPProtocolHandler:
 
         timeline = task.concise_timeline(10)
         return {"task_id": task_id, "logs": "\n".join(sections), "timeline": timeline}
+
+    def _tool_task_process_info(self, args: dict[str, Any]) -> dict:
+        role = getattr(self, "_current_role", "orchestrator")
+        if role != "supervisor":
+            raise ValueError("task_process_info is only available to supervisor sessions.")
+
+        tm = self._require_task_manager()
+        task_id = args["task_id"]
+        task = tm.get(task_id)
+        if not task:
+            raise ValueError(f"Task not found: {task_id}")
+
+        process_state = self._sync_worker_process_state(tm, task_id)
+        root_pid = process_state.get("pid")
+        child_pids = [int(p) for p in process_state.get("child_pids", []) if isinstance(p, int) and p > 0]
+        ordered_pids: list[int] = []
+        if isinstance(root_pid, int) and root_pid > 0:
+            ordered_pids.append(root_pid)
+        ordered_pids.extend(pid for pid in sorted(set(child_pids)) if pid not in ordered_pids)
+
+        metrics = self._collect_process_metrics(ordered_pids)
+        metrics_by_pid = {row["pid"]: row for row in metrics if isinstance(row.get("pid"), int)}
+
+        processes: list[dict[str, Any]] = []
+        for pid in ordered_pids:
+            row = metrics_by_pid.get(pid, {})
+            processes.append({
+                "pid": pid,
+                "is_root": bool(isinstance(root_pid, int) and pid == root_pid),
+                "is_running": bool(row),
+                "parent_pid": row.get("parent_pid"),
+                "name": row.get("name"),
+                "command_line": row.get("command_line"),
+                "cpu_percent": row.get("cpu_percent"),
+                "memory_rss_bytes": row.get("memory_rss_bytes"),
+                "memory_private_bytes": row.get("memory_private_bytes"),
+            })
+
+        running_processes = [proc for proc in processes if proc.get("is_running")]
+        total_cpu = sum(float(proc.get("cpu_percent") or 0.0) for proc in running_processes)
+        total_rss = sum(int(proc.get("memory_rss_bytes") or 0) for proc in running_processes)
+        total_private = sum(int(proc.get("memory_private_bytes") or 0) for proc in running_processes)
+
+        return {
+            "task_id": task_id,
+            "worker_process_running": bool(process_state.get("running")),
+            "root_pid": root_pid if isinstance(root_pid, int) else None,
+            "processes": processes,
+            "summary": {
+                "observed_processes": len(processes),
+                "running_processes": len(running_processes),
+                "child_processes": len(child_pids),
+                "total_cpu_percent": round(total_cpu, 2),
+                "total_memory_rss_bytes": total_rss,
+                "total_memory_private_bytes": total_private,
+            },
+        }
 
     def _tool_task_send_input(self, args: dict[str, Any]) -> dict:
         tm = self._require_task_manager()

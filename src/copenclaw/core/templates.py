@@ -107,7 +107,6 @@ def supervisor_template(
     task_id: str,
     prompt: str,
     worker_session_id: str,
-    supervisor_instructions: str,
     workspace_root: str,
 ) -> str:
     """Return rendered supervisor instructions for a specific task."""
@@ -116,10 +115,21 @@ def supervisor_template(
         task_id=task_id,
         prompt=prompt,
         worker_session_id=worker_session_id,
-        supervisor_instructions=supervisor_instructions,
         workspace_root=workspace_root,
     )
 
 def repair_template(**kwargs: str) -> str:
     """Return rendered repair instructions for a repair run."""
     return load_template("repair", **kwargs)
+
+
+def starter_template(**kwargs: str) -> str:
+    """Return rendered startup-starter instructions."""
+    return load_template("starter", **kwargs)
+
+
+def continuous_task_template(*, task_prompt: str, user_guidance: str) -> str:
+    """Return rendered continuous-task hook instructions."""
+    return load_template(
+        "continuous_task", task_prompt=task_prompt, user_guidance=user_guidance
+    )

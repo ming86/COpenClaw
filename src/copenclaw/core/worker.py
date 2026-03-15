@@ -44,6 +44,8 @@ from copenclaw.integrations.copilot_cli import (
 )
 
 logger = logging.getLogger("copenclaw.worker")
+_UNKNOWN_OPTION_STARTUP_WINDOW_SECONDS = 45.0
+_UNKNOWN_OPTION_BURST_LIMIT = 3
 
 
 def _collect_child_processes(root_pid: int) -> list[int]:
@@ -188,8 +190,6 @@ polluting it breaks other workers.
 ## How to Work
 
 1. **Use MCP tools** to do your work:
-   - `files_read` — read files from the data directory
-   - `files_write` — write files to the task workspace or data directory
    - `task_report` — report progress upward (REQUIRED)
    - `task_check_inbox` — check for messages from the orchestrator/supervisor
    - `task_get_context` — re-read your task prompt and recent messages
@@ -260,8 +260,12 @@ You are a **COpenClaw supervisor** — a QUALITY GATEKEEPER for a worker task.
 **Original Task:**
 {prompt}
 
-**Supervisor Instructions:**
-{supervisor_instructions}
+**Static Supervisor Evaluation Criteria:**
+- Look for duplicated or redundant code and require consolidation when appropriate.
+- Enforce high implementation quality (clear structure, maintainable design, robust handling).
+- Verify the worker ran meaningful tests/validation and that evidence is provided.
+- Require deep implementation that fully addresses scope, not superficial patches.
+- Be critical: if quality, testing, or depth is weak, send corrective guidance before completion.
 
 ## Workspace Root
 
@@ -298,8 +302,8 @@ When the worker reports completion, you MUST VERIFY the outcome:
 1. **CHECK OUTPUT:** Inspect `workers-workspace/` for deliverables,
    or use the built-in file tools to verify (list/read files, etc.)
 2. **TEST FUNCTIONALITY:** Actually test that the result works
-3. **FOLLOW INSTRUCTIONS:** The supervisor instructions above tell you
-   what to verify
+3. **APPLY STATIC RUBRIC:** Evaluate duplicate code, implementation quality,
+   test validation quality, and implementation depth.
 4. **CHECK README.MD:** Verify the worker updated README.md with a summary
    of the completed task. If not, send the worker a message to do it.
 5. **DECISION:**
@@ -737,6 +741,8 @@ class WorkerThread:
 
             # Stream stdout line-by-line
             assert self._process.stdout is not None
+            startup_deadline = time.monotonic() + _UNKNOWN_OPTION_STARTUP_WINDOW_SECONDS
+            unknown_option_hits = 0
             for line in self._process.stdout:
                 if self._stop_event.is_set():
                     self._log("Stop event received, breaking stream")
@@ -746,6 +752,16 @@ class WorkerThread:
                 if line:
                     self._accumulated_output.append(line)
                     self._log(line)
+                    if "unknown option '--no-warnings'" in line.lower():
+                        if time.monotonic() <= startup_deadline:
+                            unknown_option_hits += 1
+                        if unknown_option_hits >= _UNKNOWN_OPTION_BURST_LIMIT:
+                            self._log(
+                                "Detected repeated '--no-warnings' unknown-option failures during startup; terminating worker process."
+                            )
+                            if self._process and self._process.poll() is None:
+                                self._process.terminate()
+                            break
                     if self.on_output:
                         self.on_output(self.task_id, line)
 
@@ -814,7 +830,6 @@ class SupervisorThread:
         check_interval: int = 600,
         on_output: Optional[Callable[[str, str], None]] = None,
         timeout: int = 120,
-        supervisor_instructions: str = "",
         working_dir: Optional[str] = None,
         root_workspace_dir: Optional[str] = None,
         task_manager: Optional[Any] = None,
@@ -828,7 +843,6 @@ class SupervisorThread:
         self.check_interval = check_interval
         self.on_output = on_output
         self.timeout = timeout
-        self.supervisor_instructions = supervisor_instructions
         self.working_dir = working_dir   # The task directory (parent)
         self.root_workspace_dir = root_workspace_dir  # Main workspace (e.g. ~/.copenclaw)
         self._task_manager = task_manager  # For contextual trigger prompts
@@ -949,7 +963,7 @@ class SupervisorThread:
                 f"You have already assessed {task.supervisor_assessment_count} time(s) without finalizing. "
                 f"You MUST make a final decision NOW. Use task_read_peer to review, then: "
                 f"report type='completed' if the work looks good, or type='failed' if it does not. "
-                f"Do NOT report type='assessment' — that will leave the task stuck forever."
+                f"If you keep reporting type='assessment', the system will auto-finalize after repeated checks."
             )
         elif task and task.completion_deferred and worker_running:
             # Worker still running but reported completion — verify
@@ -1026,7 +1040,6 @@ class SupervisorThread:
             task_id=self.task_id,
             prompt=self.prompt,
             worker_session_id=self.worker_session_id or "(unknown)",
-            supervisor_instructions=self.supervisor_instructions or "(none specified — use your best judgment)",
             workspace_root=ws_root,
         )
         _write_instructions_file(sup_dir, instructions)
@@ -1179,7 +1192,6 @@ class WorkerPool:
         worker_session_id: Optional[str] = None,
         check_interval: int = 600,
         on_output: Optional[Callable[[str, str], None]] = None,
-        supervisor_instructions: str = "",
         working_dir: Optional[str] = None,
         task_manager: Optional[Any] = None,
     ) -> SupervisorThread:
@@ -1203,7 +1215,6 @@ class WorkerPool:
                 check_interval=check_interval,
                 on_output=on_output,
                 timeout=effective_timeout,
-                supervisor_instructions=supervisor_instructions,
                 working_dir=working_dir,
                 root_workspace_dir=self.root_workspace_dir,
                 task_manager=task_manager,

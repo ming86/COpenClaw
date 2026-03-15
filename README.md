@@ -276,7 +276,7 @@ COpenClaw uses a **3-tier autonomous task architecture**:
 | Tier | Role | Session | Key Tools |
 |---|---|---|---|
 | **Orchestrator** | User-facing brain. Routes messages, proposes tasks | Persistent, resumes across restarts | `tasks_create`, `tasks_list`, `send_message`, `jobs_schedule` |
-| **Worker** | Executes a task autonomously in a background thread | Per-task, isolated workspace | `task_report`, `task_check_inbox`, `task_set_status`, `files_read` |
+| **Worker** | Executes a task autonomously in a background thread | Per-task, isolated workspace | `task_report`, `task_check_inbox`, `task_set_status`, `task_get_context` |
 | **Supervisor** | Periodically checks on worker, intervenes if stuck | Per-task | `task_read_peer`, `task_send_input`, `task_report` |
 
 **Bidirectional ITC (Inter-Tier Communication):**
@@ -546,7 +546,6 @@ Or add to `~/.copilot/mcp-config.json`:
 | `jobs_runs` | Job execution history |
 | `jobs_cancel` | Cancel a job |
 | `send_message` | Send a message to any channel |
-| `files_read` | Read a file under data_dir |
 | `audit_read` | Read audit log entries |
 
 ### Task dispatch tools (orchestrator)
@@ -560,7 +559,9 @@ Or add to `~/.copilot/mcp-config.json`:
 | `tasks_send` | Send instruction/input/pause/resume/cancel to worker |
 | `tasks_cancel` | Cancel a running task |
 
-For `task_type="continuous_improvement"`, terminal iterations now auto-chain by default: COpenClaw creates and dispatches the next iteration with mission handoff context and a rotated focus direction (`ux`, `reliability`, `performance`, `quality`, `safety`, `observability`, `docs`). Use continuous config keys `auto_chain_enabled`, `auto_chain_max_generations`, `auto_chain_failure_limit`, and `auto_chain_failure_backoff_seconds` to tune guardrails.
+For `task_type="continuous_improvement"`, terminal iterations auto-chain by default: COpenClaw creates and dispatches the next iteration with mission handoff context and a rotated focus direction (`ux`, `reliability`, `performance`, `quality`, `safety`, `observability`, `docs`). Use continuous config keys `auto_chain_enabled`, `auto_chain_max_generations`, `auto_chain_failure_limit`, and `auto_chain_failure_backoff_seconds` to tune guardrails.
+
+For general continuous planning loops, use `tasks_propose`/`tasks_create` with `continuous_task=true` (or `task_type="continuous_task"`). This generates a strong post-completion hook prompt (optionally shaped by `continuous_prompt`) that reviews outcomes, researches next opportunities, models user scenarios, and auto-dispatches the next follow-up task.
 
 ### Task ITC tools (worker/supervisor)
 

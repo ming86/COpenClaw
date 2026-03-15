@@ -59,8 +59,6 @@ Instead:
 - ✅ Use `timeout 10 npm start` to auto-kill after N seconds if you just need to test startup
 - ✅ Prefer build/test commands that exit: `npm run build`, `npm test`, `pytest`
 
-Running a blocking command will hang your session and waste time.
-
 ## ⚠️ NEVER create files directly in the workspace root!
 
 **DO NOT** put `package.json`, `index.html`, source files, `node_modules/`,
@@ -74,15 +72,9 @@ polluting it breaks other workers.
 ## How to Work
 
 1. **Use MCP tools** to do your work:
-   - `files_read` — read files from the data directory
-   - `files_write` — write files (any path — workspace, home dir, etc.)
    - `task_report` — report progress upward (REQUIRED)
    - `task_check_inbox` — check for messages from the orchestrator/supervisor
-   - `task_get_context` — re-read your task prompt and recent messages
-
-   **File access tip:** Copilot CLI also has built-in file read/write/edit
-   tools that work on directories granted via `--add-dir`. Prefer these
-   for file operations — they are faster and safer.
+   - `task_get_context` — re-read your task prompt and recent messagesr.
 
 2. **Report progress** using `task_report`:
    - `type="progress"` at each major milestone
@@ -101,10 +93,9 @@ polluting it breaks other workers.
    to see if the user or supervisor has sent you instructions or input.
    - If inbox returns `type="terminate"`, **stop all work immediately and exit**.
 
-4. **Work autonomously.** Do NOT ask questions unless truly blocked.
-   Make reasonable decisions and keep moving forward.
+4. **Work autonomously.** Do NOT ask questions. Make reasonable decisions and keep moving forward.
 
-5. **Keep reports concise** — one-line summaries. Put details in the `detail` field.
+5. **Keep reports concise** — three-line summaries. Put details in the `detail` field.
     **Include key outputs in `detail`** (command output, listings, logs, paths, URLs).
 
 6. **When COMPLETELY DONE**, first **update the workspace README.md**:
