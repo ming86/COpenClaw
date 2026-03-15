@@ -238,6 +238,18 @@ def test_freetext_empty_output_triggers_runtime_error_callback(monkeypatch) -> N
         assert "Automatic self-repair has started" in resp.text
         assert events == [("Copilot CLI returned an empty orchestrator response.", "42")]
 
+def test_freetext_empty_output_without_runtime_error_callback_has_neutral_message(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        deps = _make_deps(tmpdir)
+        monkeypatch.setattr(deps["cli"], "run_prompt", lambda prompt, **kw: "   ")
+        monkeypatch.setattr(deps["cli"], "_discover_latest_non_task_session_id", lambda: None)
+
+        req = ChatRequest(channel="telegram", sender_id="42", chat_id="100", text="hello")
+        resp = handle_chat(req, **deps)
+
+        assert "Automatic self-repair has started" not in resp.text
+        assert "run /repair" in resp.text
+
 def test_freetext_error_output_triggers_runtime_error_callback(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         deps = _make_deps(tmpdir)

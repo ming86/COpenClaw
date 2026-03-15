@@ -437,17 +437,22 @@ def handle_chat(
     if not output.strip() and had_resume:
         output = _retry_without_resume("resume returned an empty response")
 
-    def _report_runtime_error(description: str) -> None:
+    def _report_runtime_error(description: str) -> bool:
         if not on_runtime_error:
-            return
+            return False
         try:
             on_runtime_error(description, req)
+            return True
         except Exception as callback_exc:  # noqa: BLE001
             logger.warning("Runtime error callback failed: %s", callback_exc)
+            return False
 
     if not output.strip():
-        _report_runtime_error("Copilot CLI returned an empty orchestrator response.")
-        output = "⚠️ I did not receive a model response. Automatic self-repair has started; please retry in a moment."
+        repair_started = _report_runtime_error("Copilot CLI returned an empty orchestrator response.")
+        if repair_started:
+            output = "⚠️ I did not receive a model response. Automatic self-repair has started; please retry in a moment."
+        else:
+            output = "⚠️ I did not receive a model response. Please retry in a moment or run /repair."
     elif output.lower().startswith("error:"):
         _report_runtime_error(output)
 
