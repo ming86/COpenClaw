@@ -945,20 +945,37 @@ def create_app() -> FastAPI:
             target=target,
             service_url="",
             auto_supervise=True,
-            status="proposed",
+            status="pending",
         )
+        start_error = ""
+        try:
+            mcp_handler._start_task(task)
+        except Exception as exc:  # noqa: BLE001
+            start_error = str(exc)
+            logger.error("Startup recovery task failed to auto-start: %s", exc)
 
-        proposal_msg = (
-            "⚠️ I found error(s) from the previous run.\n\n"
-            f"📋 Proposed task: {task.name}\n"
-            f"🆔 {task.task_id}\n\n"
-            "Reply **yes** to approve or **no** to reject.\n\n"
-            f"Recent errors:\n{excerpt}"
-        )
+        if start_error:
+            startup_msg = (
+                "⚠️ I found error(s) from the previous run but could not auto-start recovery.\n\n"
+                f"🧩 Task: {task.name}\n"
+                f"🆔 {task.task_id}\n"
+                f"❌ Start error: {start_error}\n\n"
+                f"Recent errors:\n{excerpt}\n\n"
+                "Run /repair to start diagnostics manually."
+            )
+        else:
+            startup_msg = (
+                "⚠️ I found error(s) from the previous run and auto-started recovery.\n\n"
+                f"🧩 Task: {task.name}\n"
+                f"🆔 {task.task_id}\n"
+                "🔄 Status: running\n\n"
+                f"Recent errors:\n{excerpt}"
+            )
+
         if channel == "telegram" and settings.telegram_bot_token:
-            _telegram_adapter().send_message(chat_id=int(target), text=proposal_msg)
+            _telegram_adapter().send_message(chat_id=int(target), text=startup_msg)
         elif channel == "terminal":
-            _terminal_emit_block("Startup issue detected", proposal_msg, emoji="⚠️")
+            _terminal_emit_block("Startup issue detected", startup_msg, emoji="⚠️")
 
         try:
             with open(marker_path, "w", encoding="utf-8") as handle:

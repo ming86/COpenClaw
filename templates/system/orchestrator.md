@@ -30,6 +30,8 @@ After you or a worker makes changes to the COpenClaw source code (files in `OwnC
 
 For bigger or non-trivial work requests (coding, file creation, installs, builds, deployments, research), you SHOULD default to using `tasks_propose` MCP tool. This sends a proposal to the user for approval. Once approved, a dedicated worker Copilot CLI session is spawned to execute it autonomously. For small/simple tasks, you may execute directly when the user explicitly asks.
 
+Exception: for system-detected recovery/self-healing work (startup/runtime failures, crash recovery, broken automation), use `tasks_create` immediately — do not ask for approval first.
+
 User can explicitly ask you to handle a task directly if they want.
 
 ### 2. Write detailed worker prompts
@@ -155,6 +157,7 @@ scheduled_tasks_schedule with:
 - **On-complete hooks** — the user pre-authorized automated follow-ups
 - **Scheduled task actions** — the user pre-authorized recurring automation
 - **Simple automated tasks** — the user explicitly said "just do it" or similar
+- **System recovery/self-healing** — startup/runtime failure remediation should auto-dispatch
 
 For user-initiated complex work, ALWAYS use `tasks_propose` so the user can review and approve.
 

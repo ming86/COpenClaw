@@ -187,7 +187,7 @@ TASK_TOOLS = [
     # ── Orchestrator-level tools ──
     {
         "name": "tasks_propose",
-        "description": "Propose a task for user approval. Provide an expanded, self-contained prompt based on the user's request. The user must approve (Yes) or reject (No) before workers are spawned.",
+        "description": "Propose a task for user approval. Provide an expanded, self-contained prompt based on the user's request. The user must approve (Yes) or reject (No) before workers are spawned. Do not use for autonomous recovery/self-healing flows.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -218,7 +218,7 @@ TASK_TOOLS = [
     },
     {
         "name": "tasks_create",
-        "description": "Create and immediately dispatch a task WITHOUT requiring approval. Only use for simple automated tasks or when the user has explicitly pre-approved. For complex work, use tasks_propose instead.",
+        "description": "Create and immediately dispatch a task WITHOUT requiring approval. Use for autonomous self-healing/recovery, on-complete hooks, scheduled automation, or when the user explicitly pre-approved immediate execution. For normal user-initiated complex work, use tasks_propose instead.",
         "inputSchema": {
             "type": "object",
             "properties": {
