@@ -40,6 +40,13 @@ def _setup_logging() -> None:
     settings = Settings.from_env()
     setup_logging(log_dir=settings.log_dir, log_level=settings.log_level, clear_on_launch=settings.clear_logs_on_launch)
 
+
+def _effective_log_level(settings: object) -> str:
+    configured = getattr(settings, "log_level", None)
+    if isinstance(configured, str) and configured.strip():
+        return configured
+    return "warning" if os.name == "nt" else "info"
+
 @app.command()
 def serve(
     host: str = typer.Option("127.0.0.1", help="Bind host"),
@@ -56,11 +63,12 @@ def serve(
     _setup_logging()
 
     def _run_once() -> None:
-        if not _env_true("copenclaw_SKIP_STARTER", default=False):
-            from copenclaw.core.config import Settings
-            from copenclaw.core.starter import run_startup_starter
+        from copenclaw.core.config import Settings
+        settings = Settings.from_env()
+        log_level = _effective_log_level(settings)
 
-            settings = Settings.from_env()
+        if not _env_true("copenclaw_SKIP_STARTER", default=False):
+            from copenclaw.core.starter import run_startup_starter
             workspace_root = os.path.abspath(settings.workspace_dir or os.getcwd())
             repo_root = _resolve_repo_root()
             logger.info("Running startup-starter session before launching server")
@@ -82,6 +90,7 @@ def serve(
             reload=reload,
             factory=True,
             access_log=access_log,
+            log_level=log_level,
         )
 
     try:
