@@ -1794,7 +1794,8 @@ class TestCopilotCliAddDirs:
         )
         cmd = cli.build_launch_command(require_subprocess=True)
         assert cmd[0] == "copilot"
-        assert cli.execution_backend == "cli"
+        assert not hasattr(cli, "execution_backend")
+        assert not hasattr(cli, "allow_cli_fallback")
 
     @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")
     def test_run_prompt_ignores_api_backend_override(self, mock_which, tmp_path):

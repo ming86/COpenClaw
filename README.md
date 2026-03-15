@@ -137,7 +137,7 @@ From chat:
 
 ## GitHub Copilot CLI — The Brain
 
-COpenClaw delegates **all AI reasoning** to [GitHub Copilot CLI](https://docs.github.com/en/copilot/github-copilot-in-the-cli). Session execution is **API-first** (Copilot SDK path) with explicit, logged fallback to CLI subprocess mode when needed; autopilot mode is enabled by default. This gives you the full power of Copilot CLI remotely:
+COpenClaw delegates **all AI reasoning** to [GitHub Copilot CLI](https://docs.github.com/en/copilot/github-copilot-in-the-cli). Session execution uses the standard **Copilot CLI subprocess wrapper path only** (no SDK backend selection); autopilot mode is enabled by default. This gives you the full power of Copilot CLI remotely:
 
 - **Vibe coding** — describe an application in natural language and Copilot CLI builds it: creates files, writes code, installs dependencies, runs the app, iterates on feedback
 - **Git operations** — commit, push, branch, merge, revert, rebase, view history, all via natural language

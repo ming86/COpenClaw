@@ -11,7 +11,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal, Optional
+from typing import Callable, Optional
 
 from copenclaw.core.logging_config import (
     append_to_file,
@@ -148,7 +148,7 @@ class CopilotCli:
         resume_session_id: Optional[str] = None,
         subcommand: Optional[str] = None,
         autopilot: Optional[bool] = None,
-        execution_backend: Optional[Literal["api", "cli"]] = None,
+        execution_backend: Optional[str] = None,
         allow_cli_fallback: Optional[bool] = None,
         yolo: bool = True,
     ) -> None:
@@ -160,9 +160,15 @@ class CopilotCli:
         self.mcp_token = mcp_token
         self.add_dirs: list[str] = add_dirs or []
         self.autopilot = defaults.autopilot if autopilot is None else autopilot
-        # Legacy compatibility: retain constructor args, but runtime is CLI-only.
-        self.execution_backend: Literal["cli"] = "cli"
-        self.allow_cli_fallback = True
+        if execution_backend and execution_backend.strip().lower() != "cli":
+            logger.info(
+                "Ignoring deprecated execution_backend=%r; CopilotCli runtime is CLI-only.",
+                execution_backend,
+            )
+        if allow_cli_fallback is False:
+            logger.info(
+                "Ignoring deprecated allow_cli_fallback=False; CopilotCli runtime is already CLI-only."
+            )
         self.yolo = yolo
         self._silent_mode = True
 
@@ -696,7 +702,7 @@ class CopilotCli:
         log_prefix: str = "ORCHESTRATOR",
         resume_id: Optional[str] = None,
         allow_retry: bool = True,
-        execution_backend: Optional[Literal["api", "cli"]] = None,
+        execution_backend: Optional[str] = None,
         autopilot: Optional[bool] = None,
         on_line: Optional[Callable[[str], Optional[bool]]] = None,
     ) -> str:
@@ -711,7 +717,12 @@ class CopilotCli:
         via ``-p``.  Output is streamed line-by-line.
         """
         self._log_prompt_header(prompt, log_prefix)
-        _ = execution_backend  # Deprecated: runtime always uses CLI subprocess path.
+        if execution_backend and execution_backend.strip().lower() != "cli":
+            logger.info(
+                "%s | Ignoring deprecated execution_backend=%r; CopilotCli runtime is CLI-only.",
+                log_prefix,
+                execution_backend,
+            )
         return self._run_prompt_cli(
             prompt,
             model=model,

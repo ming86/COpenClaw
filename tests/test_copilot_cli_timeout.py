@@ -259,9 +259,9 @@ def test_run_prompt_ignores_api_backend_override(tmp_path) -> None:
 
 def test_cli_only_mode_ignores_legacy_constructor_backend_flags(tmp_path) -> None:
     cli = CopilotCli(timeout=0, workspace_dir=str(tmp_path), execution_backend="api", allow_cli_fallback=False)
-    assert cli.execution_backend == "cli"
-    assert cli.allow_cli_fallback is True
+    assert not hasattr(cli, "execution_backend")
+    assert not hasattr(cli, "allow_cli_fallback")
     with patch.object(cli, "_run_prompt_cli", return_value="cli only") as run_cli:
-        output = cli.run_prompt("prompt two")
+        output = cli.run_prompt("prompt two", execution_backend="api")
     assert output == "cli only"
     run_cli.assert_called_once()
