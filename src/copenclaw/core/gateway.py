@@ -293,6 +293,7 @@ def _build_boot_message(
     hostname = socket.gethostname()
     os_info = f"{platform.system()} {platform.release()}"
     lines.append(f"• Host: {hostname} ({os_info})")
+    lines.append(f"• Copilot model: {_selected_copilot_model()}")
 
     # Working directory
     workspace = settings.workspace_dir or os.getcwd()
@@ -383,6 +384,20 @@ def _build_boot_message(
     ])
 
     return "\n".join(lines)
+
+
+def _selected_copilot_model() -> str:
+    """Return the currently configured Copilot model hint for operator visibility."""
+    for key in (
+        "copenclaw_COPILOT_MODEL",
+        "COPILOT_CLAW_COPILOT_MODEL",
+        "COPILOT_MODEL",
+        "GITHUB_COPILOT_MODEL",
+    ):
+        value = os.getenv(key, "").strip()
+        if value:
+            return value
+    return "default (CLI profile)"
 
 
 _README_TEMPLATE = """\
