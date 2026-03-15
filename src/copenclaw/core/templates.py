@@ -1,6 +1,6 @@
 """Template loader for system instruction files.
 
-Loads markdown templates from ``copenclaw/templates/`` and renders
+Loads markdown prompt files from ``copenclaw/systemprompts/`` and renders
 them with Python ``str.format()`` placeholders.
 """
 from __future__ import annotations
@@ -12,10 +12,10 @@ from functools import lru_cache
 
 logger = logging.getLogger("copenclaw.templates")
 
-# templates/ lives at the repo root: copenclaw/templates/
-# This file lives at:                copenclaw/src/copenclaw/core/templates.py
+# systemprompts/ lives at the repo root: copenclaw/systemprompts/
+# This file lives at:                    copenclaw/src/copenclaw/core/templates.py
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))                       # .../core/
-_TEMPLATES_DIR = os.path.join(_THIS_DIR, "..", "..", "..", "templates")       # .../copenclaw/templates/
+_TEMPLATES_DIR = os.path.join(_THIS_DIR, "..", "..", "..", "systemprompts")  # .../copenclaw/systemprompts/
 _TEMPLATES_DIR = os.path.normpath(_TEMPLATES_DIR)
 
 # ── OS-specific defaults ─────────────────────────────────────

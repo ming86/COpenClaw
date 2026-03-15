@@ -649,7 +649,7 @@ copenclaw/
 │   └── mcp/
 │       ├── protocol.py        # MCP JSON-RPC handler (20+ tools)
 │       └── server.py          # MCP REST sub-router
-├── templates/
+├── systemprompts/
 │   ├── orchestrator.md        # Orchestrator system prompt
 │   ├── worker.md              # Worker system prompt
 │   └── supervisor.md          # Supervisor system prompt

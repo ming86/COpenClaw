@@ -496,7 +496,7 @@ def _deploy_instructions(workspace_dir: str) -> None:
 
     Copilot CLI reads ``.github/copilot-instructions.md`` relative to its
     cwd (the workspace directory).  The source-of-truth template lives in
-    ``copenclaw/templates/orchestrator.md`` and is loaded via
+    ``copenclaw/systemprompts/orchestrator.md`` and is loaded via
     :func:`copenclaw.core.templates.orchestrator_template`.
     """
     try:

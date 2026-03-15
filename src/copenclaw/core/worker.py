@@ -119,11 +119,11 @@ def _collect_child_processes(root_pid: int) -> list[int]:
     return descendants
 
 # ── System prompt templates ──────────────────────────────────
-# Source-of-truth system prompts live in templates/*.md and are
+# Source-of-truth system prompts live in systemprompts/*.md and are
 # loaded via copenclaw.core.templates.
 
-WORKER_INSTRUCTIONS_TEMPLATE_REMOVED = "Deprecated: use templates/worker.md"
-SUPERVISOR_INSTRUCTIONS_TEMPLATE = "Deprecated: use templates/supervisor.md"
+WORKER_INSTRUCTIONS_TEMPLATE_REMOVED = "Deprecated: use systemprompts/worker.md"
+SUPERVISOR_INSTRUCTIONS_TEMPLATE = "Deprecated: use systemprompts/supervisor.md"
 
 
 # ── Workspace linking helpers ────────────────────────────────

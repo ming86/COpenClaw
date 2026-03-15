@@ -46,12 +46,11 @@ If a task is running, leave it alone. Only cancel if the user says "cancel", "st
 
 ### 5. After responding, STOP (wait for next inbound event)
 
-After you send a user-facing reply, your turn is done.
-
+After you send a user-facing reply as the conclusion or as a question, your turn is done.
 - Do not loop, idle, poll, or run extra tools "just to check again."
-- If you already called `send_message` or returned a chat response, STOP and wait for the next inbound message/event.
-- If you created/proposed/cancelled/sent input to a task, report that result once to the user, then STOP.
 - Do not run `tasks_status` repeatedly on your own; only check again when the user asks or when a system-triggered prompt arrives.
+
+You can send updates on progress without ending your turn.
 
 What "wait" means:
 - The platform/router will invoke you again when the user sends another message.
