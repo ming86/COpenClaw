@@ -189,6 +189,42 @@ def test_freetext_ignores_task_role_session_id(monkeypatch) -> None:
         assert resume_ids == [None]
         assert deps["sessions"].get_copilot_session_id(session_key) == "fresh-session-id"
 
+def test_freetext_empty_output_triggers_runtime_error_callback(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        deps = _make_deps(tmpdir)
+        events = []
+
+        monkeypatch.setattr(deps["cli"], "run_prompt", lambda prompt, **kw: "   ")
+        monkeypatch.setattr(deps["cli"], "_discover_latest_non_task_session_id", lambda: None)
+
+        req = ChatRequest(channel="telegram", sender_id="42", chat_id="100", text="hello")
+        resp = handle_chat(
+            req,
+            **deps,
+            on_runtime_error=lambda description, request: events.append((description, request.sender_id)),
+        )
+
+        assert "Automatic self-repair has started" in resp.text
+        assert events == [("Copilot CLI returned an empty orchestrator response.", "42")]
+
+def test_freetext_error_output_triggers_runtime_error_callback(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        deps = _make_deps(tmpdir)
+        events = []
+
+        monkeypatch.setattr(deps["cli"], "run_prompt", lambda prompt, **kw: "Error: simulated failure")
+        monkeypatch.setattr(deps["cli"], "_discover_latest_non_task_session_id", lambda: None)
+
+        req = ChatRequest(channel="telegram", sender_id="42", chat_id="100", text="hello")
+        resp = handle_chat(
+            req,
+            **deps,
+            on_runtime_error=lambda description, request: events.append((description, request.sender_id)),
+        )
+
+        assert resp.text == "Error: simulated failure"
+        assert events == [("Error: simulated failure", "42")]
+
 def test_telegram_ping_back_schedules_and_delivers(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         deps = _make_deps(tmpdir, with_scheduler=True)

@@ -147,3 +147,38 @@ def test_run_startup_starter_continues_when_done_missing(monkeypatch, tmp_path) 
 
     assert result["status"] == "skipped"
     assert "did not call done" in result["note"].lower()
+
+
+def test_cli_serve_auto_repairs_and_retries_once(monkeypatch, tmp_path) -> None:
+    calls: list[str] = []
+    monkeypatch.setenv("copenclaw_AUTO_REPAIR_ON_STARTUP", "1")
+    monkeypatch.delenv("copenclaw_AUTO_REPAIR_ATTEMPTED", raising=False)
+    monkeypatch.delenv("copenclaw_SKIP_STARTER", raising=False)
+    monkeypatch.setattr(cli, "_load_env", lambda: None)
+    monkeypatch.setattr(cli, "_setup_logging", lambda: None)
+    monkeypatch.setattr("copenclaw.core.disclaimer.check_or_prompt", lambda allow_flag=False: None)
+    monkeypatch.setattr(cli, "_resolve_repo_root", lambda: str(tmp_path / "repo"))
+    monkeypatch.setattr(
+        Settings,
+        "from_env",
+        staticmethod(
+            lambda: SimpleNamespace(
+                workspace_dir=str(tmp_path / "workspace"),
+                log_dir=str(tmp_path / "logs"),
+                copilot_cli_timeout=600,
+            )
+        ),
+    )
+
+    def _starter(**kwargs):  # noqa: ANN003
+        calls.append("starter")
+        if calls.count("starter") == 1:
+            raise RuntimeError("startup failure")
+        return {"status": "done"}
+
+    monkeypatch.setattr("copenclaw.core.starter.run_startup_starter", _starter)
+    monkeypatch.setattr("copenclaw.core.repair.run_repair", lambda **kwargs: calls.append("repair"))
+    monkeypatch.setattr("copenclaw.cli.uvicorn.run", lambda *args, **kwargs: calls.append("uvicorn"))
+
+    cli.serve(host="127.0.0.1", port=18790, reload=False, accept_risks=True)
+    assert calls == ["starter", "repair", "starter", "uvicorn"]

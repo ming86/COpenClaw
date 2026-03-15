@@ -259,8 +259,7 @@ def _build_watchdog_progress_update(  # noqa: ANN001
         f"Current activity: {current_activity}. "
         f"Completed since last update: {completed_work}. "
         f"{next_step}. "
-        f"Worker PID: {process_state.get('pid') or 'unknown'}, "
-        f"active processes: {len(active_pids)}, children: {len(child_pids)}."
+        f"Active processes: {len(active_pids)}, children: {len(child_pids)}."
     )
     return summary, detail
 
@@ -990,6 +989,10 @@ def create_app() -> FastAPI:
     # crashed session).  We subtract a small grace window (10s) so
     # messages sent just before boot aren't accidentally dropped.
     _boot_epoch = int(time.time()) - 10
+    _auto_repair_lock = threading.Lock()
+    _auto_repair_running = False
+    _auto_repair_last_ts = 0.0
+    _AUTO_REPAIR_COOLDOWN_SECONDS = 300
 
     # ---- task approval callback ----
 
@@ -1062,6 +1065,63 @@ def create_app() -> FastAPI:
             daemon=True,
             name="repair-run",
         ).start()
+
+    def _trigger_auto_repair(description: str, req: ChatRequest | None = None) -> bool:
+        from copenclaw.core.repair import run_repair
+
+        nonlocal _auto_repair_running, _auto_repair_last_ts
+        now = time.time()
+        with _auto_repair_lock:
+            if _auto_repair_running:
+                logger.warning("Auto-repair request ignored: repair already running")
+                return False
+            if now - _auto_repair_last_ts < _AUTO_REPAIR_COOLDOWN_SECONDS:
+                logger.warning("Auto-repair request ignored: cooldown active")
+                return False
+            _auto_repair_running = True
+            _auto_repair_last_ts = now
+
+        workspace_root = settings.workspace_dir or os.getcwd()
+        repo_root = _resolve_repo_root()
+        short_desc = " ".join(description.split())[:1500]
+
+        if req:
+            _send_repair_message(
+                req.channel,
+                req.chat_id,
+                "🛠️ Runtime issue detected. Starting automatic self-repair now.",
+                req.service_url,
+            )
+        elif settings.telegram_bot_token and settings.telegram_owner_chat_id:
+            _send_repair_message(
+                "telegram",
+                settings.telegram_owner_chat_id,
+                "🛠️ Runtime issue detected. Starting automatic self-repair now.",
+            )
+
+        def _notify(msg: str) -> None:
+            if req:
+                _send_repair_message(req.channel, req.chat_id, msg, req.service_url)
+            elif settings.telegram_bot_token and settings.telegram_owner_chat_id:
+                _send_repair_message("telegram", settings.telegram_owner_chat_id, msg)
+
+        def _runner() -> None:
+            nonlocal _auto_repair_running
+            try:
+                run_repair(
+                    description=f"Automatic runtime repair: {short_desc}",
+                    workspace_root=workspace_root,
+                    repo_root=repo_root,
+                    log_dir=settings.log_dir,
+                    timeout=settings.copilot_cli_timeout,
+                    notify=_notify,
+                )
+            finally:
+                with _auto_repair_lock:
+                    _auto_repair_running = False
+
+        threading.Thread(target=_runner, daemon=True, name="runtime-auto-repair").start()
+        return True
 
     def _handle_telegram_update(update: dict) -> None:
         """Process a single Telegram update from polling (same logic as webhook)."""
@@ -1142,9 +1202,17 @@ def create_app() -> FastAPI:
                 on_task_retry_rejected=_on_task_retry_rejected,
                 on_restart=_restart_app,
                 on_repair=_on_repair,
+                on_runtime_error=lambda description, chat_request: _trigger_auto_repair(description, chat_request),
             )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Telegram poll chat handling failed: %s", exc)
+            _trigger_auto_repair(f"Telegram polling chat failure: {exc}", chat_req)
+            tg.send_message(chat_id=chat_id, text="⚠️ Runtime error detected. Automatic self-repair started.")
+            return
         finally:
             typing_stop.set()
+        if resp.text.lower().startswith("error:"):
+            _trigger_auto_repair(f"Telegram orchestrator response error: {resp.text}", chat_req)
         tg.send_message(chat_id=chat_id, text=resp.text)
 
     # ---- lifespan ----
@@ -1338,9 +1406,17 @@ def create_app() -> FastAPI:
                 on_task_retry_rejected=_on_task_retry_rejected,
                 on_restart=_restart_app,
                 on_repair=_on_repair,
+                on_runtime_error=lambda description, chat_request: _trigger_auto_repair(description, chat_request),
             )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Telegram webhook chat handling failed: %s", exc)
+            _trigger_auto_repair(f"Telegram webhook chat failure: {exc}", chat_req)
+            _telegram_adapter().send_message(chat_id=chat_id, text="⚠️ Runtime error detected. Automatic self-repair started.")
+            return {"status": "error"}
         finally:
             typing_stop.set()
+        if resp.text.lower().startswith("error:"):
+            _trigger_auto_repair(f"Telegram orchestrator response error: {resp.text}", chat_req)
         tg.send_message(chat_id=chat_id, text=resp.text)
         return {"status": resp.status}
 
@@ -1409,6 +1485,7 @@ def create_app() -> FastAPI:
             on_task_retry_rejected=_on_task_retry_rejected,
             on_restart=_restart_app,
             on_repair=_on_repair,
+            on_runtime_error=lambda description, chat_request: _trigger_auto_repair(description, chat_request),
         )
         _teams_adapter().send_message(
             service_url=service_url,
@@ -1496,6 +1573,7 @@ def create_app() -> FastAPI:
                 on_task_retry_rejected=_on_task_retry_rejected,
                 on_restart=_restart_app,
                 on_repair=_on_repair,
+                on_runtime_error=lambda description, chat_request: _trigger_auto_repair(description, chat_request),
             )
             adapter.send_message(to=sender, text=resp.text)
 
@@ -1550,6 +1628,7 @@ def create_app() -> FastAPI:
             on_task_retry_rejected=_on_task_retry_rejected,
             on_restart=_restart_app,
             on_repair=_on_repair,
+            on_runtime_error=lambda description, chat_request: _trigger_auto_repair(description, chat_request),
         )
         sig.send_message(recipient=sender, text=resp.text)
 
@@ -1626,6 +1705,7 @@ def create_app() -> FastAPI:
             on_task_retry_rejected=_on_task_retry_rejected,
             on_restart=_restart_app,
             on_repair=_on_repair,
+            on_runtime_error=lambda description, chat_request: _trigger_auto_repair(description, chat_request),
         )
         _slack_adapter().send_message(channel=channel_id, text=resp.text)
         return {"status": resp.status}

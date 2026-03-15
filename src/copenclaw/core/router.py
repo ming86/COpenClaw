@@ -71,6 +71,7 @@ def handle_chat(
     on_task_retry_rejected: Optional[object] = None,  # callable(task_id) -> None
     on_restart: Optional[object] = None,  # callable(reason: str) -> None
     on_repair: Optional[object] = None,  # callable(description: str, req: ChatRequest) -> None
+    on_runtime_error: Optional[object] = None,  # callable(description: str, req: ChatRequest) -> None
 ) -> ChatResponse:
     """Route a normalised chat request and return a response."""
     rid = req.request_id or generate_request_id()
@@ -426,6 +427,20 @@ def handle_chat(
                 output = f"Error: {retry_exc}"
         else:
             output = f"Error: {exc}"
+
+    def _report_runtime_error(description: str) -> None:
+        if not on_runtime_error:
+            return
+        try:
+            on_runtime_error(description, req)
+        except Exception as callback_exc:  # noqa: BLE001
+            logger.warning("Runtime error callback failed: %s", callback_exc)
+
+    if not output.strip():
+        _report_runtime_error("Copilot CLI returned an empty orchestrator response.")
+        output = "⚠️ I did not receive a model response. Automatic self-repair has started; please retry in a moment."
+    elif output.lower().startswith("error:"):
+        _report_runtime_error(output)
 
     # After the prompt completes, discover the session ID so we can
     # resume this conversation next time.  We always try to discover

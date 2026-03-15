@@ -442,6 +442,7 @@ if errorlevel 1 (
 )
 
 set "VENV_PYTHON=!PROJECT_DIR!\.venv\Scripts\python.exe"
+set "START_SCRIPT=!PROJECT_DIR!\scripts\start-windows.ps1"
 set "TASK_NAME=copenclaw"
 
 :: Remove existing task if present
@@ -451,12 +452,12 @@ if not errorlevel 1 (
     echo   Removed existing scheduled task.
 )
 
-schtasks /create /tn "!TASK_NAME!" /tr "\"!VENV_PYTHON!\" -m copenclaw.cli serve" /sc onlogon /rl limited /f >nul 2>&1
+schtasks /create /tn "!TASK_NAME!" /tr "powershell -NoProfile -ExecutionPolicy Bypass -File \"!START_SCRIPT!\" -BindHost 127.0.0.1 -Port 18790" /sc onlogon /rl limited /f >nul 2>&1
 if errorlevel 1 (
     echo   [!!] Failed to create scheduled task. You may need to run as administrator.
-    echo   Create manually: schtasks /create /tn copenclaw /tr "\"!VENV_PYTHON!\" -m copenclaw.cli serve" /sc onlogon
+    echo   Create manually: schtasks /create /tn copenclaw /tr "powershell -NoProfile -ExecutionPolicy Bypass -File \"!START_SCRIPT!\" -BindHost 127.0.0.1 -Port 18790" /sc onlogon
 ) else (
-    echo   [OK] Scheduled task '!TASK_NAME!' created (runs at logon).
+    echo   [OK] Scheduled task '!TASK_NAME!' created (runs auto-heal startup at logon).
     echo   Manage with:  schtasks /query /tn !TASK_NAME!
     echo   Remove with:  schtasks /delete /tn !TASK_NAME! /f
 )
@@ -495,6 +496,12 @@ if "!HEALTH_PASSED!"=="1" (
     echo   Start manually to verify: COpenClaw serve
 )
 
+if "!COPILOT_FOUND!"=="1" (
+    echo.
+    echo [6b/6] Running Copilot installer auto-repair session...
+    call :run_installer_autorepair
+)
+
 :: ── Summary ─────────────────────────────────────────────────────────────
 
 :summary
@@ -505,8 +512,12 @@ echo ==================================================
 echo.
 echo   Install location:  !PROJECT_DIR!
 echo   Start COpenClaw:   copenclaw serve
+echo   Auto-heal start:   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\start-windows.ps1
 echo   Reconfigure:       python scripts\configure.py
 echo   Reconfigure channels only:  python scripts\configure.py --reconfigure
+echo.
+echo   Installer note: this install now uses an auto-heal Windows launcher for scheduled start/restart recovery.
+echo   If you customized local installer behavior, consider opening a PR with your changes.
 echo.
 
 if "%RUN_REPAIR%"=="1" (
@@ -529,6 +540,27 @@ if defined MACHINE_PATH (
     )
 )
 if defined MERGED_PATH set "PATH=!MERGED_PATH!"
+exit /b 0
+
+:run_installer_autorepair
+set "CAN_RUN_COPILOT=1"
+if not defined GH_TOKEN if not defined GITHUB_TOKEN (
+    copilot auth status >nul 2>&1
+    if errorlevel 1 set "CAN_RUN_COPILOT=0"
+)
+
+if "!CAN_RUN_COPILOT!"=="0" (
+    echo   [!!] Copilot auth is not ready; skipping autonomous installer repair session.
+    echo       After login, rerun: copenclaw repair --description "Post-install auto-repair"
+    exit /b 0
+)
+
+set "AUTOHEAL_PROMPT=You are the COpenClaw Windows installer auto-repair agent. Validate this install in !PROJECT_DIR!. If startup or install issues are present, fix them in-place, verify health, and summarize all changes."
+copilot --add-dir "!PROJECT_DIR!" --add-dir "!INSTALL_DIR!" --autopilot --yolo --no-ask-user -s -p "!AUTOHEAL_PROMPT!"
+if errorlevel 1 (
+    echo   [!!] Copilot installer auto-repair session failed. Running built-in repair fallback...
+    "!VENV_PYTHON!" -m copenclaw.cli repair --description "Installer auto-repair fallback after Copilot CLI failure"
+)
 exit /b 0
 
 :done
