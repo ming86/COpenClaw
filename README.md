@@ -646,12 +646,16 @@ copenclaw/
 │   └── mcp/
 │       ├── protocol.py        # MCP JSON-RPC handler (20+ tools)
 │       └── server.py          # MCP REST sub-router
-├── systemprompts/
-│   ├── orchestrator.md        # Orchestrator system prompt
-│   ├── worker_instructions.md # Worker instructions system prompt
-│   ├── worker_start_session_prompt.md  # Fresh worker-session kickoff prompt
-│   ├── worker_resume_session_prompt.md # Resumed worker-session kickoff prompt
-│   └── supervisor.md          # Supervisor system prompt
+├── templates/
+│   ├── system/
+│   │   ├── orchestrator.md        # Orchestrator system prompt
+│   │   ├── worker_instructions.md # Worker instructions system prompt
+│   │   ├── supervisor.md          # Supervisor system prompt
+│   │   ├── starter.md             # Startup recovery system prompt
+│   │   └── repair.md              # Runtime repair system prompt
+│   └── prompts/
+│       ├── worker_start_session_prompt.md  # Fresh worker-session kickoff prompt
+│       └── worker_resume_session_prompt.md # Resumed worker-session kickoff prompt
 ├── tests/                     # 265 tests
 ├── scripts/
 │   ├── configure.py           # Interactive channel configurator
