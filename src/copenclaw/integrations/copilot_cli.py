@@ -214,12 +214,19 @@ class CopilotCli:
         if sys.platform == "win32":
             normalized = os.path.normcase(path)
             root, ext = os.path.splitext(normalized)
-            if ext in {".cmd", ".bat"}:
+            if ext in {".cmd", ".bat", ".ps1"}:
                 exe_candidate = f"{root}.exe"
                 if os.path.exists(exe_candidate):
                     return os.path.normcase(exe_candidate)
             return normalized
         return path
+
+    @staticmethod
+    def _build_executable_cmd(executable: str) -> list[str]:
+        if sys.platform == "win32" and executable.lower().endswith(".ps1"):
+            shell = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
+            return [os.path.normcase(shell), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", executable]
+        return [executable]
 
     @staticmethod
     def _normalize_subcommand(raw: Optional[str]) -> Optional[str]:
@@ -267,7 +274,7 @@ class CopilotCli:
         is set, that value is used automatically.
         """
         exe = self._resolve_executable()
-        cmd = [exe]
+        cmd = self._build_executable_cmd(exe)
         if self._subcommand:
             cmd.append(self._subcommand)
 

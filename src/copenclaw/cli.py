@@ -76,7 +76,6 @@ def serve(
                 host=host,
                 port=port,
                 reload=reload,
-                accept_risks=accept_risks,
                 workspace_root=workspace_root,
                 repo_root=repo_root,
                 log_dir=settings.log_dir,

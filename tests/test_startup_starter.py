@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 from types import SimpleNamespace
+
+import pytest
 
 from copenclaw import cli
 from copenclaw.core import starter
@@ -55,6 +58,62 @@ def test_startup_probe_succeeds_and_stops_process(monkeypatch, tmp_path) -> None
     result = starter.startup_probe()
     assert result["ok"] is True
     assert fake.terminated is True
+
+
+def test_startup_probe_kills_process_before_closing_log_handle(monkeypatch, tmp_path) -> None:
+    probe_log = tmp_path / "probe.log"
+    monkeypatch.setenv("copenclaw_STARTER_COMMAND_JSON", json.dumps(["python", "-V"]))
+    monkeypatch.setenv("copenclaw_STARTER_HEALTH_URL", "http://127.0.0.1:18790/health")
+    monkeypatch.setenv("copenclaw_STARTER_PROBE_TIMEOUT", "30")
+    monkeypatch.setenv("copenclaw_STARTER_CWD", str(tmp_path))
+    monkeypatch.setenv("copenclaw_STARTER_PROBE_LOG", str(probe_log))
+
+    events: list[str] = []
+
+    class FakeHandle:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            events.append("close")
+            self.closed = True
+
+        def write(self, _value: str) -> int:
+            return 0
+
+        def flush(self) -> None:
+            return None
+
+    fake_handle = FakeHandle()
+    real_open = open
+
+    def _open(path, mode="r", *args, **kwargs):  # noqa: ANN001
+        if os.fspath(path) == str(probe_log) and "a" in mode:
+            return fake_handle
+        return real_open(path, mode, *args, **kwargs)
+
+    class FakeProcess:
+        def poll(self):  # noqa: ANN001
+            return None
+
+        def kill(self) -> None:
+            events.append(f"kill_closed={fake_handle.closed}")
+
+        def terminate(self) -> None:
+            return None
+
+        def wait(self, timeout=None):  # noqa: ANN001
+            return None
+
+    monkeypatch.setattr("builtins.open", _open)
+    monkeypatch.setattr(starter.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+    monkeypatch.setattr(starter, "_healthcheck", lambda _url: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        starter.startup_probe()
+
+    assert events[0] == "kill_closed=False"
+    assert events[-1] == "close"
 
 
 def test_tail_lines_returns_last_nonempty_lines(tmp_path) -> None:
@@ -194,7 +253,6 @@ def test_run_startup_starter_continues_when_done_missing(monkeypatch, tmp_path) 
         host="127.0.0.1",
         port=18790,
         reload=False,
-        accept_risks=True,
         workspace_root=str(workspace_root),
         repo_root=str(repo_root),
         log_dir=str(log_dir),

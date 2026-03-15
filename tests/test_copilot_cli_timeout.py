@@ -131,6 +131,32 @@ def test_resolve_executable_prefers_exe_over_cmd_wrapper() -> None:
     assert resolved == os.path.normcase(r"C:\Tools\copilot.exe")
 
 
+def test_base_cmd_wraps_ps1_executable_with_powershell(tmp_path) -> None:
+    cli = CopilotCli(executable="copilot", workspace_dir=str(tmp_path))
+    with (
+        patch(
+            "copenclaw.integrations.copilot_cli.shutil.which",
+            side_effect=[
+                r"C:\Tools\copilot.ps1",
+                None,
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            ],
+        ),
+        patch("copenclaw.integrations.copilot_cli.os.path.exists", return_value=False),
+        patch("copenclaw.integrations.copilot_cli.sys.platform", "win32"),
+    ):
+        cmd = cli._base_cmd()
+
+    assert cmd[:5] == [
+        os.path.normcase(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+    ]
+    assert cmd[5] == os.path.normcase(r"C:\Tools\copilot.ps1")
+
+
 def test_run_prompt_cli_no_warnings_retry_drops_resume_session(tmp_path) -> None:
     cli = CopilotCli(timeout=0, workspace_dir=str(tmp_path), resume_session_id="resume-123")
     cli._version_logged = True

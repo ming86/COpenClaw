@@ -977,11 +977,12 @@ def create_app() -> FastAPI:
         elif channel == "terminal":
             _terminal_emit_block("Startup issue detected", startup_msg, emoji="⚠️")
 
-        try:
-            with open(marker_path, "w", encoding="utf-8") as handle:
-                json.dump({"digest": digest, "task_id": task.task_id, "updated_at": datetime.now(timezone.utc).isoformat()}, handle)
-        except Exception:  # noqa: BLE001
-            logger.debug("Failed to write startup error proposal marker", exc_info=True)
+        if not start_error:
+            try:
+                with open(marker_path, "w", encoding="utf-8") as handle:
+                    json.dump({"digest": digest, "task_id": task.task_id, "updated_at": datetime.now(timezone.utc).isoformat()}, handle)
+            except Exception:  # noqa: BLE001
+                logger.debug("Failed to write startup error proposal marker", exc_info=True)
 
     # ---- brain bootstrap ----
 
@@ -1422,7 +1423,6 @@ def create_app() -> FastAPI:
         # Show "typing..." while the brain is thinking
         tg = _telegram_adapter()
         typing_stop = tg.start_typing_loop(chat_id)
-        _mirror_activity("telegram", str(chat_id), f"⬅️ {sender_id_str}: {text}")
 
         chat_req = ChatRequest(
             channel="telegram",

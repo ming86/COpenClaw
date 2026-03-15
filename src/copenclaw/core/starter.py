@@ -184,10 +184,10 @@ def startup_probe() -> dict[str, Any]:
             "tail": _tail_lines(probe_log, max_lines=50),
         }
     finally:
-        handle.close()
         if process is not None and process.poll() is None:
             with contextlib.suppress(Exception):
                 process.kill()
+        handle.close()
 
 
 @contextlib.contextmanager
@@ -209,7 +209,6 @@ def run_startup_starter(
     host: str,
     port: int,
     reload: bool,
-    accept_risks: bool,
     workspace_root: str,
     repo_root: str,
     log_dir: str,
@@ -233,18 +232,15 @@ def run_startup_starter(
         if os.path.isfile(done_path):
             os.remove(done_path)
 
-    def _escape(text: str) -> str:
-        return text.replace("{", "{{").replace("}", "}}")
-
     instructions = starter_template(
-        workspace_root=_escape(workspace_root),
-        repo_root=_escape(repo_root),
-        log_dir=_escape(log_dir),
-        health_url=_escape(health_url),
-        start_command=_escape(" ".join(command)),
-        probe_log_path=_escape(probe_log_path),
-        recent_errors=_escape(_format_block(_recent_errors(copenclaw_log))),
-        activity_tail=_escape(_format_block(_tail_lines(activity_log, max_lines=120))),
+        workspace_root=workspace_root,
+        repo_root=repo_root,
+        log_dir=log_dir,
+        health_url=health_url,
+        start_command=" ".join(command),
+        probe_log_path=probe_log_path,
+        recent_errors=_format_block(_recent_errors(copenclaw_log)),
+        activity_tail=_format_block(_tail_lines(activity_log, max_lines=120)),
     )
     instructions_dir = os.path.join(starter_dir, ".github")
     os.makedirs(instructions_dir, exist_ok=True)
