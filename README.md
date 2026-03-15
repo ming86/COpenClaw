@@ -275,7 +275,7 @@ COpenClaw uses a **3-tier autonomous task architecture**:
 
 | Tier | Role | Session | Key Tools |
 |---|---|---|---|
-| **Orchestrator** | User-facing brain. Routes messages, proposes tasks | Persistent, resumes across restarts | `tasks_create`, `tasks_list`, `send_message`, `jobs_schedule` |
+| **Orchestrator** | User-facing brain. Routes messages, proposes tasks | Persistent, resumes across restarts | `tasks_create`, `tasks_list`, `send_message`, `scheduled_tasks_schedule` |
 | **Worker** | Executes a task autonomously in a background thread | Per-task, isolated workspace | `task_report`, `task_check_inbox`, `task_set_status`, `task_get_context` |
 | **Supervisor** | Periodically checks on worker, intervenes if stuck | Per-task | `task_read_peer`, `task_send_input`, `task_report` |
 
@@ -541,10 +541,10 @@ Or add to `~/.copilot/mcp-config.json`:
 
 | Tool | Description |
 |---|---|
-| `jobs_schedule` | Schedule a one-shot or cron job |
-| `jobs_list` | List all jobs |
-| `jobs_runs` | Job execution history |
-| `jobs_cancel` | Cancel a job |
+| `scheduled_tasks_schedule` | Schedule a one-shot or cron task |
+| `scheduled_tasks_list` | List all scheduled tasks |
+| `scheduled_tasks_runs` | Scheduled task execution history |
+| `scheduled_tasks_cancel` | Cancel a scheduled task |
 | `send_message` | Send a message to any channel |
 | `audit_read` | Read audit log entries |
 

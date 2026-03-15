@@ -67,50 +67,50 @@ def _is_image_path(path: str) -> bool:
 
 INFRA_TOOLS = [
     {
-        "name": "jobs_schedule",
-        "description": "Schedule a one-shot or recurring job. The job will execute a prompt via Copilot CLI and deliver the result to a chat channel.",
+        "name": "scheduled_tasks_schedule",
+        "description": "Schedule a one-shot or recurring scheduled task. The scheduled task will execute a prompt via Copilot CLI and deliver the result to a chat channel.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Human-readable job name"},
-                "run_at": {"type": "string", "description": "ISO-8601 datetime when the job should first run"},
-                "prompt": {"type": "string", "description": "The prompt to execute when the job fires"},
+                "name": {"type": "string", "description": "Human-readable scheduled task name"},
+                "run_at": {"type": "string", "description": "ISO-8601 datetime when the scheduled task should first run"},
+                "prompt": {"type": "string", "description": "The prompt to execute when the scheduled task fires"},
                 "channel": {"type": "string", "enum": ["telegram", "teams", "whatsapp", "signal", "slack"], "description": "Delivery channel"},
                 "target": {"type": "string", "description": "Chat ID (Telegram) or conversation ID (Teams)"},
-                "cron_expr": {"type": "string", "description": "Optional cron expression for recurring jobs"},
+                "cron_expr": {"type": "string", "description": "Optional cron expression for recurring scheduled tasks"},
                 "service_url": {"type": "string", "description": "Required for Teams channel"},
             },
             "required": ["name", "run_at", "prompt", "channel", "target"],
         },
     },
     {
-        "name": "jobs_list",
-        "description": "List all scheduled jobs with their status.",
+        "name": "scheduled_tasks_list",
+        "description": "List all scheduled tasks with their status.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
-        "name": "jobs_cancel",
-        "description": "Cancel a scheduled job by its ID.",
+        "name": "scheduled_tasks_cancel",
+        "description": "Cancel a scheduled task by its ID.",
         "inputSchema": {
             "type": "object",
-            "properties": {"job_id": {"type": "string"}},
-            "required": ["job_id"],
+            "properties": {"scheduled_task_id": {"type": "string"}},
+            "required": ["scheduled_task_id"],
         },
     },
     {
-        "name": "jobs_runs",
-        "description": "List job run history.",
+        "name": "scheduled_tasks_runs",
+        "description": "List scheduled task run history.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "job_id": {"type": "string", "description": "Filter by job ID (optional)"},
+                "scheduled_task_id": {"type": "string", "description": "Filter by scheduled task ID (optional)"},
                 "limit": {"type": "integer", "default": 50},
             },
         },
     },
     {
-        "name": "jobs_clear_all",
-        "description": "Remove all scheduled jobs (both pending and completed). Returns the count of jobs cleared.",
+        "name": "scheduled_tasks_clear_all",
+        "description": "Remove all scheduled tasks (both pending and completed). Returns the count of tasks cleared.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
@@ -633,16 +633,16 @@ class MCPProtocolHandler:
 
     def _call_tool(self, name: str, args: dict[str, Any]) -> Any:
         # Infrastructure tools
-        if name == "jobs_schedule":
-            return self._tool_jobs_schedule(args)
-        if name == "jobs_list":
-            return self._tool_jobs_list(args)
-        if name == "jobs_cancel":
-            return self._tool_jobs_cancel(args)
-        if name == "jobs_runs":
-            return self._tool_jobs_runs(args)
-        if name == "jobs_clear_all":
-            return self._tool_jobs_clear_all(args)
+        if name == "scheduled_tasks_schedule":
+            return self._tool_scheduled_tasks_schedule(args)
+        if name == "scheduled_tasks_list":
+            return self._tool_scheduled_tasks_list(args)
+        if name == "scheduled_tasks_cancel":
+            return self._tool_scheduled_tasks_cancel(args)
+        if name == "scheduled_tasks_runs":
+            return self._tool_scheduled_tasks_runs(args)
+        if name == "scheduled_tasks_clear_all":
+            return self._tool_scheduled_tasks_clear_all(args)
         if name == "send_message":
             return self._tool_send_message(args)
         if name == "audit_read":
@@ -695,7 +695,7 @@ class MCPProtocolHandler:
 
     # ── Infrastructure tool implementations ───────────────
 
-    def _tool_jobs_schedule(self, args: dict[str, Any]) -> dict:
+    def _tool_scheduled_tasks_schedule(self, args: dict[str, Any]) -> dict:
         run_at_str = args["run_at"]
         try:
             run_at = datetime.fromisoformat(run_at_str.replace("Z", "+00:00"))
@@ -712,8 +712,9 @@ class MCPProtocolHandler:
             raise ValueError("; ".join(errors))
         job = self.scheduler.schedule(args["name"], run_at, payload, cron_expr=cron_expr)
         if self.data_dir:
-            log_event(self.data_dir, "mcp.jobs.schedule", {"job_id": job.job_id, "name": job.name})
+            log_event(self.data_dir, "mcp.scheduled_tasks.schedule", {"scheduled_task_id": job.job_id, "name": job.name})
         return {
+            "scheduled_task_id": job.job_id,
             "job_id": job.job_id,
             "name": job.name,
             "run_at": job.run_at.isoformat(),
@@ -721,26 +722,37 @@ class MCPProtocolHandler:
             "cron_expr": job.cron_expr,
         }
 
-    def _tool_jobs_list(self, args: dict[str, Any]) -> dict:
+    def _tool_scheduled_tasks_list(self, args: dict[str, Any]) -> dict:
         jobs = self.scheduler.list()
-        return {"jobs": [{"job_id": j.job_id, "name": j.name, "run_at": j.run_at.isoformat(),
-                          "completed": j.completed_at is not None, "cancelled": j.cancelled,
-                          "cron_expr": j.cron_expr} for j in jobs]}
+        entries = [{
+            "scheduled_task_id": j.job_id,
+            "job_id": j.job_id,
+            "name": j.name,
+            "run_at": j.run_at.isoformat(),
+            "completed": j.completed_at is not None,
+            "cancelled": j.cancelled,
+            "cron_expr": j.cron_expr,
+        } for j in jobs]
+        return {"scheduled_tasks": entries, "jobs": entries}
 
-    def _tool_jobs_cancel(self, args: dict[str, Any]) -> dict:
-        if self.scheduler.cancel(args["job_id"]):
+    def _tool_scheduled_tasks_cancel(self, args: dict[str, Any]) -> dict:
+        scheduled_task_id = args.get("scheduled_task_id") or args.get("job_id")
+        if not scheduled_task_id:
+            raise ValueError("scheduled_task_id is required")
+        if self.scheduler.cancel(scheduled_task_id):
             if self.data_dir:
-                log_event(self.data_dir, "mcp.jobs.cancel", {"job_id": args["job_id"]})
-            return {"status": "cancelled", "job_id": args["job_id"]}
-        raise ValueError(f"Job not found: {args['job_id']}")
+                log_event(self.data_dir, "mcp.scheduled_tasks.cancel", {"scheduled_task_id": scheduled_task_id})
+            return {"status": "cancelled", "scheduled_task_id": scheduled_task_id, "job_id": scheduled_task_id}
+        raise ValueError(f"Scheduled task not found: {scheduled_task_id}")
 
-    def _tool_jobs_runs(self, args: dict[str, Any]) -> dict:
-        return {"runs": self.scheduler.list_runs(job_id=args.get("job_id"), limit=args.get("limit", 50))}
+    def _tool_scheduled_tasks_runs(self, args: dict[str, Any]) -> dict:
+        scheduled_task_id = args.get("scheduled_task_id") or args.get("job_id")
+        return {"runs": self.scheduler.list_runs(job_id=scheduled_task_id, limit=args.get("limit", 50))}
 
-    def _tool_jobs_clear_all(self, args: dict[str, Any]) -> dict:
+    def _tool_scheduled_tasks_clear_all(self, args: dict[str, Any]) -> dict:
         count = self.scheduler.clear_all()
         if self.data_dir:
-            log_event(self.data_dir, "mcp.jobs.clear_all", {"cleared": count})
+            log_event(self.data_dir, "mcp.scheduled_tasks.clear_all", {"cleared": count})
         return {"status": "cleared", "cleared": count}
 
     def _audit(self, action: str, payload: dict[str, Any]) -> None:

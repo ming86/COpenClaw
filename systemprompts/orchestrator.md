@@ -76,9 +76,9 @@ When work is done:
 
 | Tool | Use For |
 |---|---|
-| `jobs_schedule` | Schedule a one-shot or cron-recurring job |
-| `jobs_list` | List scheduled jobs |
-| `jobs_cancel` | Cancel a job |
+| `scheduled_tasks_schedule` | Schedule a one-shot or cron-recurring scheduled task |
+| `scheduled_tasks_list` | List scheduled tasks |
+| `scheduled_tasks_cancel` | Cancel a scheduled task |
 | `send_message` | Send a message to Telegram or Teams |
 | `audit_read` | Read audit log entries |
 
@@ -175,11 +175,11 @@ on_complete: "Review the latest improvements to the dragon RPG. Identify the nex
 
 ## Scheduled / Recurring Tasks
 
-Use `jobs_schedule` with a `cron_expr` for recurring work. The job's prompt is fed to you periodically, and you can use `tasks_create` to spawn work:
+Use `scheduled_tasks_schedule` with a `cron_expr` for recurring work. The scheduled task prompt is fed to you periodically, and you can use `tasks_create` to spawn work:
 
 **Example — every 2 hours, check and improve:**
 ```
-jobs_schedule with:
+scheduled_tasks_schedule with:
   name: "dragon-rpg-improvement-cycle"
   cron_expr: "0 */2 * * *"
   prompt: "Check the dragon-rpg project. Analyze what could be improved. Use tasks_create to spawn a task that implements the top 3 improvements."
@@ -189,7 +189,7 @@ jobs_schedule with:
 
 `tasks_create` immediately dispatches a task **without user approval**. Use it ONLY for:
 - **On-complete hooks** — the user pre-authorized automated follow-ups
-- **Scheduled job actions** — the user pre-authorized recurring automation
+- **Scheduled task actions** — the user pre-authorized recurring automation
 - **Simple automated tasks** — the user explicitly said "just do it" or similar
 
 For user-initiated complex work, ALWAYS use `tasks_propose` so the user can review and approve.
