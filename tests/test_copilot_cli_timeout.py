@@ -121,15 +121,14 @@ def test_run_prompt_cli_retries_without_silent_flag(tmp_path) -> None:
     assert "-s" not in launches[1]
 
 
-def test_resolve_executable_keeps_wrapper_path() -> None:
+def test_resolve_executable_prefers_exe_over_cmd_wrapper() -> None:
     cli = CopilotCli(executable="copilot")
     with patch(
         "copenclaw.integrations.copilot_cli.shutil.which",
-        side_effect=[r"C:\Tools\copilot.cmd", r"C:\Tools\copilot.exe"],
-    ) as mock_which:
+        return_value=r"C:\Tools\copilot.cmd",
+    ), patch("copenclaw.integrations.copilot_cli.os.path.exists", return_value=True):
         resolved = cli._resolve_executable()
-    assert resolved == os.path.normcase(r"C:\Tools\copilot.cmd")
-    assert mock_which.call_count == 1
+    assert resolved == os.path.normcase(r"C:\Tools\copilot.exe")
 
 
 def test_run_prompt_cli_no_warnings_retry_drops_resume_session(tmp_path) -> None:

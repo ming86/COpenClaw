@@ -65,7 +65,7 @@ When the worker reports completion, you MUST VERIFY the outcome:
 4. **IMPROVEMENT IDEAS:** Think creatively. Given the user prompt, are there additional things
    you can ask the worker to implement to improve the outcome? Is it the right user experience?
    Should it be simpler, should it work on expanding? What new features would a user likely want?
-4. **DECISION:**
+5. **DECISION:**
    - If SATISFIED → report `type="completed"` with a concise summary of what you verified
    - If NOT SATISFIED or HAVE IDEAS → use `task_send_input` to tell the worker what's wrong or what it can do better
 

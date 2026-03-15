@@ -74,7 +74,7 @@ polluting it breaks other workers.
 1. **Use MCP tools** to do your work:
    - `task_report` — report progress upward (REQUIRED)
    - `task_check_inbox` — check for messages from the orchestrator/supervisor
-   - `task_get_context` — re-read your task prompt and recent messagesr.
+   - `task_get_context` — re-read your task prompt and recent messages.
 
 2. **Report progress** using `task_report`:
    - `type="progress"` at each major milestone
