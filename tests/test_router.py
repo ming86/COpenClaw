@@ -239,8 +239,10 @@ def test_approve_proposed_task() -> None:
         )
 
         approved_ids = []
-        def mock_approve(task_id):
+        approved_tokens = []
+        def mock_approve(task_id, approval_token=""):
             approved_ids.append(task_id)
+            approved_tokens.append(approval_token)
             tm.update_status(task_id, "running")
             return {"task_id": task_id, "status": "running"}
 
@@ -251,6 +253,7 @@ def test_approve_proposed_task() -> None:
         assert "Approved" in resp.text
         assert "test-deploy-alpha" in resp.text
         assert task.task_id in approved_ids
+        assert approved_tokens and approved_tokens[0] == task.approval_token
 
 def test_reject_proposed_task() -> None:
     """User replies 'No' to reject a proposed task."""
@@ -282,11 +285,36 @@ def test_no_proposal_passes_through(monkeypatch) -> None:
         resp = handle_chat(req, **deps)
         assert resp.text.startswith("echo:Yes")
 
-def test_approve_with_emoji() -> None:
-    """User replies with 👍 emoji to approve."""
+def test_proposal_does_not_auto_approve_on_non_explicit_text(monkeypatch) -> None:
+    """A proposed task should not start unless the user sends an explicit approval reply."""
     with tempfile.TemporaryDirectory() as tmpdir:
         deps = _make_deps(tmpdir, with_tasks=True)
         tm: TaskManager = deps["task_manager"]
+
+        task = tm.create_task(
+            name="needs-explicit-yes",
+            prompt="Do work",
+            plan="Plan",
+            channel="telegram",
+            target="100",
+            status="proposed",
+        )
+
+        monkeypatch.setattr(deps["cli"], "run_prompt", lambda prompt, **kw: f"echo:{prompt}")
+        req = ChatRequest(channel="telegram", sender_id="42", chat_id="100", text="ok")
+        resp = handle_chat(req, **deps)
+
+        assert resp.text.startswith("echo:ok")
+        assert tm.get(task.task_id).status == "proposed"
+
+def test_approve_with_emoji() -> None:
+    """Emoji-only replies should not auto-approve proposals."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        deps = _make_deps(tmpdir, with_tasks=True)
+        tm: TaskManager = deps["task_manager"]
+        monkeypatch_cli = deps["cli"]
+        import types
+        monkeypatch_cli.run_prompt = types.MethodType(lambda self, prompt, **kw: f"echo:{prompt}", monkeypatch_cli)
 
         task = tm.create_task(
             name="emoji-task",
@@ -297,19 +325,19 @@ def test_approve_with_emoji() -> None:
             status="proposed",
         )
 
-        approved_ids = []
-        deps["on_task_approved"] = lambda tid: approved_ids.append(tid) or {"task_id": tid}
-
         req = ChatRequest(channel="telegram", sender_id="42", chat_id="100", text="👍")
         resp = handle_chat(req, **deps)
-        assert "Approved" in resp.text
-        assert task.task_id in approved_ids
+        assert resp.text.startswith("echo:👍")
+        assert tm.get(task.task_id).status == "proposed"
 
 def test_reject_with_emoji() -> None:
-    """User replies with 👎 emoji to reject."""
+    """Emoji-only replies should not auto-reject proposals."""
     with tempfile.TemporaryDirectory() as tmpdir:
         deps = _make_deps(tmpdir, with_tasks=True)
         tm: TaskManager = deps["task_manager"]
+        monkeypatch_cli = deps["cli"]
+        import types
+        monkeypatch_cli.run_prompt = types.MethodType(lambda self, prompt, **kw: f"echo:{prompt}", monkeypatch_cli)
 
         task = tm.create_task(
             name="reject-task",
@@ -322,8 +350,33 @@ def test_reject_with_emoji() -> None:
 
         req = ChatRequest(channel="telegram", sender_id="42", chat_id="100", text="👎")
         resp = handle_chat(req, **deps)
-        assert "Rejected" in resp.text
-        assert tm.get(task.task_id).status == "cancelled"
+        assert resp.text.startswith("echo:👎")
+        assert tm.get(task.task_id).status == "proposed"
+
+
+def test_internal_sender_cannot_auto_approve_proposal() -> None:
+    """System/internal sender IDs must not be able to approve proposals."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        deps = _make_deps(tmpdir, allow_from=["42", "worker-internal"], with_tasks=True)
+        tm: TaskManager = deps["task_manager"]
+
+        task = tm.create_task(
+            name="internal-guard-task",
+            prompt="Do work",
+            plan="Plan",
+            channel="telegram",
+            target="100",
+            status="proposed",
+        )
+        approved_ids = []
+        deps["on_task_approved"] = lambda tid, approval_token="": approved_ids.append(tid) or {"task_id": tid}
+
+        req = ChatRequest(channel="telegram", sender_id="worker-internal", chat_id="100", text="Yes")
+        resp = handle_chat(req, **deps)
+        assert resp.status == "denied"
+        assert "direct user reply" in resp.text
+        assert task.task_id not in approved_ids
+        assert tm.get(task.task_id).status == "proposed"
 
 def test_proposal_filtered_by_channel() -> None:
     """Proposals are filtered by channel so a Teams proposal doesn't match Telegram 'Yes'."""
