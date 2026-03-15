@@ -27,6 +27,9 @@ logger = logging.getLogger("copenclaw.copilot_cli")
 
 DEFAULT_TIMEOUT = 7200  # seconds (2 hours)
 _DEFAULT_EXECUTION_BACKEND = "api"
+_UNKNOWN_OPTION_STARTUP_WINDOW_SECONDS = 45.0
+_UNKNOWN_OPTION_BURST_LIMIT = 3
+_MIN_NO_WARNINGS_FIXED_VERSION = (0, 0, 410)
 
 
 def _env_get(*names: str) -> Optional[str]:
@@ -177,12 +180,16 @@ class CopilotCli:
         self.execution_backend: Literal["api", "cli"] = execution_backend or defaults.execution_backend
         self.allow_cli_fallback = defaults.allow_cli_fallback if allow_cli_fallback is None else allow_cli_fallback
         self.yolo = yolo
+        self._silent_mode = True
 
         self._session_id: Optional[str] = None
         self._resume_session_id: Optional[str] = resume_session_id
         self._mcp_config_path: Optional[str] = mcp_config_path
-        self._subcommand: Optional[str] = subcommand or os.getenv("COPILOT_CLI_SUBCOMMAND")
+        raw_subcommand = subcommand or os.getenv("COPILOT_CLI_SUBCOMMAND")
+        self._subcommand: Optional[str] = self._normalize_subcommand(raw_subcommand)
         self._initialized = False
+        self._version_logged = False
+        self._cached_version: Optional[str] = None
 
     @property
     def session_id(self) -> Optional[str]:
@@ -202,14 +209,19 @@ class CopilotCli:
         path = shutil.which(self.executable)
         if not path:
             raise CopilotCliError("copilot CLI not found on PATH")
-        if sys.platform == "win32":
-            suffix = Path(path).suffix.lower()
-            if suffix in {".bat", ".cmd", ".ps1"}:
-                exe_name = f"{Path(self.executable).stem}.exe"
-                exe_path = shutil.which(exe_name)
-                if exe_path:
-                    return exe_path
         return path
+
+    @staticmethod
+    def _normalize_subcommand(raw: Optional[str]) -> Optional[str]:
+        if raw is None:
+            return None
+        candidate = raw.strip()
+        if not candidate:
+            return None
+        if candidate.startswith("-") or any(ch.isspace() for ch in candidate):
+            logger.warning("Ignoring invalid Copilot subcommand override: %r", raw)
+            return None
+        return candidate
 
     def _ensure_mcp_config(self) -> str:
         """Write MCP config into the workspace directory (or .data/) and return abs path.
@@ -267,10 +279,9 @@ class CopilotCli:
                 cmd.extend(["--add-dir", abs_d])
 
         # Non-interactive autonomous flags
-        flags = [
-            "--no-ask-user",
-            "-s",  # silent (clean output only)
-        ]
+        flags = ["--no-ask-user"]
+        if self._silent_mode:
+            flags.append("-s")  # silent (clean output only)
         if self.yolo:
             # --yolo enables all permissions (tools, paths, URLs) at once
             flags.insert(0, "--yolo")
@@ -306,6 +317,7 @@ class CopilotCli:
             or "expected 0 arguments" in lowered
             or "unexpected extra argument" in lowered
             or "no such option" in lowered
+            or "unknown option" in lowered
         )
 
     @staticmethod
@@ -322,6 +334,62 @@ class CopilotCli:
     def _should_retry_without_autopilot(cls, output: str) -> bool:
         lowered = output.lower()
         return "autopilot" in lowered and cls._is_unknown_option_error(lowered)
+
+    @classmethod
+    def _should_retry_without_silent(cls, output: str) -> bool:
+        return cls._is_no_warnings_unknown_option(output)
+
+    @staticmethod
+    def _is_no_warnings_unknown_option(text: str) -> bool:
+        lowered = text.lower()
+        return "--no-warnings" in lowered and "unknown option" in lowered
+
+    @classmethod
+    def _should_retry_with_clean_session(cls, output: str, *, burst_detected: bool) -> bool:
+        lowered = output.lower()
+        if not cls._is_no_warnings_unknown_option(lowered):
+            return False
+        if burst_detected:
+            return True
+        return lowered.count("unknown option '--no-warnings'") + lowered.count('unknown option "--no-warnings"') >= 2
+
+    @staticmethod
+    def _sanitize_cmd_for_log(cmd: list[str]) -> list[str]:
+        sanitized: list[str] = []
+        mask_next = False
+        for part in cmd:
+            if mask_next:
+                sanitized.append("<prompt>")
+                mask_next = False
+                continue
+            sanitized.append(part)
+            if part in {"-p", "--prompt"}:
+                mask_next = True
+        return sanitized
+
+    @staticmethod
+    def _extract_semver(raw: str) -> Optional[tuple[int, int, int]]:
+        match = re.search(r"(\d+)\.(\d+)\.(\d+)", raw)
+        if not match:
+            return None
+        return int(match.group(1)), int(match.group(2)), int(match.group(3))
+
+    def _log_cli_runtime_metadata(self, log_prefix: str) -> None:
+        if self._version_logged:
+            return
+        self._version_logged = True
+        try:
+            self._cached_version = self.version()
+            logger.info("%s | Copilot CLI version: %s", log_prefix, self._cached_version)
+            parsed = self._extract_semver(self._cached_version)
+            if parsed is not None and parsed < _MIN_NO_WARNINGS_FIXED_VERSION:
+                logger.warning(
+                    "%s | Copilot CLI version %s may include known '--no-warnings' issues",
+                    log_prefix,
+                    self._cached_version,
+                )
+        except CopilotCliError as exc:
+            logger.warning("%s | Unable to determine Copilot CLI version: %s", log_prefix, exc)
 
     def _orchestrator_log_path(self) -> str:
         return get_orchestrator_log_path()
@@ -545,12 +613,20 @@ class CopilotCli:
         autopilot: Optional[bool],
         on_line: Optional[Callable[[str], Optional[bool]]],
     ) -> str:
+        self._log_cli_runtime_metadata(log_prefix)
         cmd = self._base_cmd(resume_id=resume_id, autopilot=autopilot)
         cmd.extend(["-p", prompt])
         if model:
             cmd.extend(["--model", model])
 
         effective_cwd = cwd or self.workspace_dir
+        logger.info(
+            "%s | Launching Copilot CLI (cwd=%s, resume=%s, cmd=%s)",
+            log_prefix,
+            effective_cwd,
+            bool(resume_id or self._resume_session_id),
+            self._sanitize_cmd_for_log(cmd),
+        )
         try:
             process = subprocess.Popen(
                 cmd,
@@ -568,7 +644,10 @@ class CopilotCli:
 
         output_lines: list[str] = []
         early_stopped = False
+        burst_detected = False
         timed_out = False
+        startup_deadline = time.monotonic() + _UNKNOWN_OPTION_STARTUP_WINDOW_SECONDS
+        unknown_option_hits = 0
         timeout_timer: Optional[threading.Timer] = None
         if self.timeout and self.timeout > 0:
             def _on_timeout() -> None:
@@ -588,8 +667,21 @@ class CopilotCli:
             for line in process.stdout:
                 output_lines.append(line)
                 self._log_line(line, prefix=log_prefix)
+                clean_line = line.rstrip("\n\r")
+                if self._is_no_warnings_unknown_option(clean_line):
+                    if time.monotonic() <= startup_deadline:
+                        unknown_option_hits += 1
+                    if unknown_option_hits >= _UNKNOWN_OPTION_BURST_LIMIT:
+                        burst_detected = True
+                        early_stopped = True
+                        logger.warning(
+                            "%s | Repeated '--no-warnings' unknown-option failures detected; terminating process",
+                            log_prefix,
+                        )
+                        process.terminate()
+                        break
                 if on_line:
-                    should_stop = on_line(line.rstrip("\n\r"))
+                    should_stop = on_line(clean_line)
                     if should_stop:
                         early_stopped = True
                         logger.info("%s | Early stop requested; terminating Copilot CLI process", log_prefix)
@@ -612,7 +704,35 @@ class CopilotCli:
         output = "".join(output_lines).strip()
         if timed_out:
             raise CopilotCliError(f"copilot CLI timed out after {self.timeout}s")
-        if process.returncode != 0 and not early_stopped:
+        if process.returncode != 0 and (not early_stopped or burst_detected):
+            if allow_retry and self._silent_mode and self._should_retry_without_silent(output):
+                logger.warning("copilot CLI rejected silent mode; retrying without '-s'")
+                self._silent_mode = False
+                return self._run_prompt_cli(
+                    prompt,
+                    model=model,
+                    cwd=cwd,
+                    log_prefix=log_prefix,
+                    resume_id=resume_id,
+                    allow_retry=False,
+                    autopilot=autopilot,
+                    on_line=on_line,
+                )
+            if allow_retry and self._should_retry_with_clean_session(output, burst_detected=burst_detected):
+                logger.warning(
+                    "%s | Retrying with clean session after '--no-warnings' unknown-option failure",
+                    log_prefix,
+                )
+                return self._run_prompt_cli(
+                    prompt,
+                    model=model,
+                    cwd=cwd,
+                    log_prefix=log_prefix,
+                    resume_id=None,
+                    allow_retry=False,
+                    autopilot=autopilot,
+                    on_line=on_line,
+                )
             if allow_retry and not self._subcommand and self._should_retry_with_chat(output):
                 logger.warning("copilot CLI rejected args; retrying with 'chat' subcommand")
                 self._subcommand = "chat"
