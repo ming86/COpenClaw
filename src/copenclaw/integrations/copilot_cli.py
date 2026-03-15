@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-import inspect
 import json
 import logging
 import os
@@ -13,7 +11,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional
+from typing import Callable, Literal, Optional
 
 from copenclaw.core.logging_config import (
     append_to_file,
@@ -26,7 +24,6 @@ from copenclaw.core.mcp_registry import get_user_servers_for_merge
 logger = logging.getLogger("copenclaw.copilot_cli")
 
 DEFAULT_TIMEOUT = 7200  # seconds (2 hours)
-_DEFAULT_EXECUTION_BACKEND = "api"
 _UNKNOWN_OPTION_STARTUP_WINDOW_SECONDS = 45.0
 _UNKNOWN_OPTION_BURST_LIMIT = 3
 _MIN_NO_WARNINGS_FIXED_VERSION = (0, 0, 410)
@@ -52,26 +49,13 @@ class CopilotLaunchDefaults:
     """Centralized defaults for all Copilot session launches."""
 
     autopilot: bool
-    execution_backend: Literal["api", "cli"]
-    allow_cli_fallback: bool
 
 
 def load_launch_defaults() -> CopilotLaunchDefaults:
-    backend_raw = (
-        _env_get("copenclaw_COPILOT_EXECUTION_BACKEND", "COPILOT_CLAW_COPILOT_EXECUTION_BACKEND")
-        or _DEFAULT_EXECUTION_BACKEND
-    ).strip().lower()
-    backend: Literal["api", "cli"] = "cli" if backend_raw == "cli" else "api"
     return CopilotLaunchDefaults(
         autopilot=_env_bool(
             "copenclaw_COPILOT_AUTOPILOT_DEFAULT",
             "COPILOT_CLAW_COPILOT_AUTOPILOT_DEFAULT",
-            default=True,
-        ),
-        execution_backend=backend,
-        allow_cli_fallback=_env_bool(
-            "copenclaw_COPILOT_ALLOW_CLI_FALLBACK",
-            "COPILOT_CLAW_COPILOT_ALLOW_CLI_FALLBACK",
             default=True,
         ),
     )
@@ -152,9 +136,6 @@ class CopilotCli:
     Output is streamed line-by-line to the logger and to per-task log
     files so you can watch in real-time.
     """
-    _api_fallback_warning_emitted = False
-    _api_subprocess_fallback_warning_emitted = False
-
     def __init__(
         self,
         executable: Optional[str] = None,
@@ -179,8 +160,9 @@ class CopilotCli:
         self.mcp_token = mcp_token
         self.add_dirs: list[str] = add_dirs or []
         self.autopilot = defaults.autopilot if autopilot is None else autopilot
-        self.execution_backend: Literal["api", "cli"] = execution_backend or defaults.execution_backend
-        self.allow_cli_fallback = defaults.allow_cli_fallback if allow_cli_fallback is None else allow_cli_fallback
+        # Legacy compatibility: retain constructor args, but runtime is CLI-only.
+        self.execution_backend: Literal["cli"] = "cli"
+        self.allow_cli_fallback = True
         self.yolo = yolo
         self._silent_mode = True
 
@@ -314,17 +296,7 @@ class CopilotCli:
         resume_id: Optional[str] = None,
         require_subprocess: bool = False,
     ) -> list[str]:
-        """Build a launch command, using explicit CLI fallback when required."""
-        if require_subprocess and self.execution_backend == "api":
-            if not self.allow_cli_fallback:
-                raise CopilotCliError(
-                    "Copilot API backend selected, but subprocess launch requires explicit CLI fallback"
-                )
-            if not CopilotCli._api_subprocess_fallback_warning_emitted:
-                logger.warning(
-                    "Copilot API backend selected; using explicit CLI fallback for subprocess launch"
-                )
-                CopilotCli._api_subprocess_fallback_warning_emitted = True
+        """Build a launch command for CLI subprocess execution."""
         return self._base_cmd(resume_id=resume_id)
 
     @staticmethod
@@ -528,92 +500,6 @@ class CopilotCli:
             get_copilot_boot_failure_log_path(),
             f"[{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}] {error_text}",
         )
-
-    @staticmethod
-    def _await_if_needed(value: Any) -> Any:
-        if inspect.isawaitable(value):
-            return asyncio.run(value)
-        return value
-
-    @staticmethod
-    def _extract_sdk_text(response: Any) -> str:
-        if response is None:
-            return ""
-        if isinstance(response, str):
-            return response
-        for attr in ("content", "text", "message"):
-            val = getattr(response, attr, None)
-            if isinstance(val, str):
-                return val
-        data = getattr(response, "data", None)
-        if data is not None:
-            for attr in ("content", "text", "message"):
-                val = getattr(data, attr, None)
-                if isinstance(val, str):
-                    return val
-                if isinstance(data, dict) and isinstance(data.get(attr), str):
-                    return data[attr]
-        if isinstance(response, dict):
-            for key in ("content", "text", "message"):
-                val = response.get(key)
-                if isinstance(val, str):
-                    return val
-                if isinstance(val, dict):
-                    nested = val.get("content") or val.get("text")
-                    if isinstance(nested, str):
-                        return nested
-        return str(response)
-
-    def _load_sdk_client_type(self) -> type | None:
-        candidates = (
-            ("github_copilot_sdk", "CopilotClient"),
-            ("copilot_sdk", "CopilotClient"),
-        )
-        for module_name, class_name in candidates:
-            try:
-                module = __import__(module_name, fromlist=[class_name])
-            except ImportError:
-                continue
-            client_type = getattr(module, class_name, None)
-            if isinstance(client_type, type):
-                return client_type
-        return None
-
-    def _run_prompt_api(
-        self,
-        prompt: str,
-        *,
-        model: Optional[str],
-        log_prefix: str,
-    ) -> str:
-        client_type = self._load_sdk_client_type()
-        if client_type is None:
-            raise CopilotCliError("Copilot SDK backend unavailable (missing github_copilot_sdk/copilot_sdk)")
-        try:
-            client = client_type()
-            create_session = getattr(client, "create_session", None) or getattr(client, "createSession", None)
-            if not callable(create_session):
-                raise CopilotCliError("Copilot SDK backend missing create_session/createSession")
-            session = self._await_if_needed(create_session(model=model) if model else create_session())
-            send = getattr(session, "send_and_wait", None) or getattr(session, "sendAndWait", None) or getattr(session, "send", None)
-            if not callable(send):
-                raise CopilotCliError("Copilot SDK session missing send_and_wait/sendAndWait/send")
-            try:
-                response = self._await_if_needed(send(prompt=prompt))
-            except TypeError:
-                response = self._await_if_needed(send(prompt))
-            output = self._extract_sdk_text(response).strip()
-            if output:
-                self._log_line(output, prefix=log_prefix)
-            stop = getattr(client, "stop", None)
-            if callable(stop):
-                self._await_if_needed(stop())
-            self._initialized = True
-            return output
-        except CopilotCliError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            raise CopilotCliError(f"copilot API backend error: {exc}") from exc
 
     def _run_prompt_cli(
         self,
@@ -825,20 +711,7 @@ class CopilotCli:
         via ``-p``.  Output is streamed line-by-line.
         """
         self._log_prompt_header(prompt, log_prefix)
-        backend = execution_backend or self.execution_backend
-        if backend == "api":
-            try:
-                output = self._run_prompt_api(prompt, model=model, log_prefix=log_prefix)
-                logger.info("%s → complete (%d chars) [backend=api]", log_prefix, len(output))
-                return output
-            except CopilotCliError as api_exc:
-                if not self.allow_cli_fallback:
-                    raise
-                if not CopilotCli._api_fallback_warning_emitted:
-                    logger.warning("Copilot API backend failed; using explicit CLI fallback: %s", api_exc)
-                    CopilotCli._api_fallback_warning_emitted = True
-                else:
-                    logger.debug("Copilot API backend failed again; continuing CLI fallback")
+        _ = execution_backend  # Deprecated: runtime always uses CLI subprocess path.
         return self._run_prompt_cli(
             prompt,
             model=model,

@@ -1775,55 +1775,36 @@ class TestCopilotCliAddDirs:
         assert "--autopilot" not in cmd
 
     @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")
-    def test_subprocess_launch_uses_explicit_cli_fallback(self, mock_which, tmp_path):
+    def test_subprocess_launch_is_cli_only(self, mock_which, tmp_path):
         from copenclaw.integrations.copilot_cli import CopilotCli
 
-        cli = CopilotCli(
-            workspace_dir=str(tmp_path),
-            execution_backend="api",
-            allow_cli_fallback=True,
-        )
+        cli = CopilotCli(workspace_dir=str(tmp_path))
         cmd = cli.build_launch_command(require_subprocess=True)
         assert cmd[0] == "copilot"
         assert "--no-ask-user" in cmd
 
     @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")
-    def test_subprocess_launch_requires_explicit_fallback(self, mock_which, tmp_path):
-        from copenclaw.integrations.copilot_cli import CopilotCli, CopilotCliError
-
-        cli = CopilotCli(
-            workspace_dir=str(tmp_path),
-            execution_backend="api",
-            allow_cli_fallback=False,
-        )
-        with pytest.raises(CopilotCliError, match="subprocess launch"):
-            cli.build_launch_command(require_subprocess=True)
-
-    @patch("copenclaw.integrations.copilot_cli.subprocess.Popen")
-    @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")
-    def test_run_prompt_api_backend_falls_back_to_cli(self, mock_which, mock_popen, tmp_path):
+    def test_subprocess_launch_ignores_legacy_api_flags(self, mock_which, tmp_path):
         from copenclaw.integrations.copilot_cli import CopilotCli
 
-        mock_popen.return_value = FakeProcess(["api fallback ok"], exit_code=0)
-        cli = CopilotCli(
-            workspace_dir=str(tmp_path),
-            execution_backend="api",
-            allow_cli_fallback=True,
-        )
-        output = cli.run_prompt("test prompt")
-        assert "api fallback ok" in output
-
-    @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")
-    def test_run_prompt_api_backend_without_fallback_raises(self, mock_which, tmp_path):
-        from copenclaw.integrations.copilot_cli import CopilotCli, CopilotCliError
-
         cli = CopilotCli(
             workspace_dir=str(tmp_path),
             execution_backend="api",
             allow_cli_fallback=False,
         )
-        with pytest.raises(CopilotCliError, match="SDK backend unavailable"):
-            cli.run_prompt("test prompt")
+        cmd = cli.build_launch_command(require_subprocess=True)
+        assert cmd[0] == "copilot"
+        assert cli.execution_backend == "cli"
+
+    @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")
+    def test_run_prompt_ignores_api_backend_override(self, mock_which, tmp_path):
+        from copenclaw.integrations.copilot_cli import CopilotCli
+
+        cli = CopilotCli(workspace_dir=str(tmp_path), execution_backend="api", allow_cli_fallback=False)
+        with patch.object(cli, "_run_prompt_cli", return_value="cli only") as run_cli:
+            output = cli.run_prompt("test prompt", execution_backend="api")
+        assert output == "cli only"
+        run_cli.assert_called_once()
 
 # ── Test: Worker instructions mention built-in tools ─────────
 

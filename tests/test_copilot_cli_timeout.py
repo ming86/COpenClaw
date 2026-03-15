@@ -249,32 +249,19 @@ def test_run_prompt_cli_does_not_disable_autopilot(tmp_path) -> None:
     assert popen.call_count == 1
 
 
-def test_run_prompt_api_fallback_warning_logged_once(monkeypatch, tmp_path) -> None:  # noqa: ANN001
-    monkeypatch.setattr(CopilotCli, "_api_fallback_warning_emitted", False)
-    cli = CopilotCli(timeout=0, workspace_dir=str(tmp_path), execution_backend="api", allow_cli_fallback=True)
-    with (
-        patch.object(cli, "_run_prompt_api", side_effect=CopilotCliError("api down")),
-        patch.object(cli, "_run_prompt_cli", return_value="fallback ok"),
-        patch("copenclaw.integrations.copilot_cli.logger.warning") as warning_log,
-    ):
-        first = cli.run_prompt("prompt one")
-        second = cli.run_prompt("prompt two")
-    assert first == "fallback ok"
-    assert second == "fallback ok"
-    assert warning_log.call_count == 1
+def test_run_prompt_ignores_api_backend_override(tmp_path) -> None:
+    cli = CopilotCli(timeout=0, workspace_dir=str(tmp_path))
+    with patch.object(cli, "_run_prompt_cli", return_value="cli only") as run_cli:
+        output = cli.run_prompt("prompt one", execution_backend="api")
+    assert output == "cli only"
+    run_cli.assert_called_once()
 
 
-def test_run_prompt_api_fallback_warning_once_across_instances(monkeypatch, tmp_path) -> None:  # noqa: ANN001
-    monkeypatch.setattr(CopilotCli, "_api_fallback_warning_emitted", False)
-    cli_one = CopilotCli(timeout=0, workspace_dir=str(tmp_path), execution_backend="api", allow_cli_fallback=True)
-    cli_two = CopilotCli(timeout=0, workspace_dir=str(tmp_path), execution_backend="api", allow_cli_fallback=True)
-    with (
-        patch.object(cli_one, "_run_prompt_api", side_effect=CopilotCliError("api down")),
-        patch.object(cli_two, "_run_prompt_api", side_effect=CopilotCliError("api down")),
-        patch.object(cli_one, "_run_prompt_cli", return_value="fallback one"),
-        patch.object(cli_two, "_run_prompt_cli", return_value="fallback two"),
-        patch("copenclaw.integrations.copilot_cli.logger.warning") as warning_log,
-    ):
-        assert cli_one.run_prompt("prompt one") == "fallback one"
-        assert cli_two.run_prompt("prompt two") == "fallback two"
-    assert warning_log.call_count == 1
+def test_cli_only_mode_ignores_legacy_constructor_backend_flags(tmp_path) -> None:
+    cli = CopilotCli(timeout=0, workspace_dir=str(tmp_path), execution_backend="api", allow_cli_fallback=False)
+    assert cli.execution_backend == "cli"
+    assert cli.allow_cli_fallback is True
+    with patch.object(cli, "_run_prompt_cli", return_value="cli only") as run_cli:
+        output = cli.run_prompt("prompt two")
+    assert output == "cli only"
+    run_cli.assert_called_once()

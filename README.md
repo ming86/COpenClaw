@@ -580,8 +580,6 @@ All configuration is via environment variables (or `.env` file). See [`.env.exam
 | `COPILOT_CLAW_DATA_DIR` | `.data` | Directory for jobs, sessions, tasks, audit log |
 | `COPILOT_CLAW_WORKSPACE_DIR` | `.` | Working directory for Copilot CLI |
 | `COPILOT_CLAW_CLI_TIMEOUT` | `7200` | Copilot CLI subprocess timeout (seconds) |
-| `COPILOT_CLAW_COPILOT_EXECUTION_BACKEND` | `api` | Session execution backend (`api` or `cli`) |
-| `COPILOT_CLAW_COPILOT_ALLOW_CLI_FALLBACK` | `true` | Allow explicit CLI fallback when API backend is unavailable |
 | `COPILOT_CLAW_COPILOT_AUTOPILOT_DEFAULT` | `true` | Enable Copilot autopilot mode by default for all sessions |
 | `COPILOT_CLAW_MCP_TOKEN` | *(empty)* | Bearer token to protect MCP endpoints |
 | `COPILOT_CLAW_ALLOW_ALL_COMMANDS` | `true` | Allow all shell commands (set false to use `COPILOT_CLAW_ALLOWED_COMMANDS`) |
