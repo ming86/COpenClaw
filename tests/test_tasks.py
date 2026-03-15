@@ -597,7 +597,7 @@ class TestRecoveryManagement:
 
 
 class TestContinuousImprovement:
-    def test_create_continuous_task_initializes_state_and_checkpoints(self, tm):
+    def test_create_continuous_improvement_task_initializes_state_and_checkpoints(self, tm):
         task = tm.create_task(
             name="CI Task",
             prompt="Improve quality",

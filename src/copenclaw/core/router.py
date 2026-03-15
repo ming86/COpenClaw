@@ -79,6 +79,7 @@ def handle_chat(
     on_task_retry_rejected: Optional[object] = None,  # callable(task_id) -> None
     on_restart: Optional[object] = None,  # callable(reason: str) -> None
     on_repair: Optional[object] = None,  # callable(description: str, req: ChatRequest) -> None
+    on_runtime_error: Optional[object] = None,  # callable(description: str, req: ChatRequest) -> None
 ) -> ChatResponse:
     """Route a normalised chat request and return a response."""
     rid = req.request_id or generate_request_id()
@@ -427,6 +428,22 @@ def handle_chat(
         "After responding, STOP — do not loop or idle.]"
     )
 
+    had_resume = bool(copilot_sid or cli.resume_session_id)
+
+    def _retry_without_resume(reason: str) -> str:
+        logger.warning("Copilot CLI %s for %s; retrying without resume", reason, session_key)
+        if copilot_sid:
+            sessions.clear_copilot_session_id(session_key)
+        cli.resume_session_id = None
+        try:
+            return cli.run_prompt(
+                prompt_with_reminder,
+                resume_id=None,
+                on_line=_should_stop_after_proposal_line,
+            )
+        except CopilotCliError as retry_exc:
+            return f"Error: {retry_exc}"
+
     try:
         output = cli.run_prompt(
             prompt_with_reminder,
@@ -436,22 +453,34 @@ def handle_chat(
     except CopilotCliError as exc:
         # If a previously stored resume session is stale (for example after a
         # crashed Copilot CLI process), clear it and retry once without resume.
-        had_resume = bool(copilot_sid or cli.resume_session_id)
         if had_resume:
-            logger.warning("Copilot CLI resume failed for %s; retrying without resume: %s", session_key, exc)
-            if copilot_sid:
-                sessions.clear_copilot_session_id(session_key)
-            cli.resume_session_id = None
-            try:
-                output = cli.run_prompt(
-                    prompt_with_reminder,
-                    resume_id=None,
-                    on_line=_should_stop_after_proposal_line,
-                )
-            except CopilotCliError as retry_exc:
-                output = f"Error: {retry_exc}"
+            output = _retry_without_resume(f"resume failed: {exc}")
         else:
             output = f"Error: {exc}"
+
+    # Copilot CLI can occasionally return a blank response when resuming a stale
+    # session; retry once without resume before surfacing runtime-repair fallback.
+    if not output.strip() and had_resume:
+        output = _retry_without_resume("resume returned an empty response")
+
+    def _report_runtime_error(description: str) -> bool:
+        if not on_runtime_error:
+            return False
+        try:
+            on_runtime_error(description, req)
+            return True
+        except Exception as callback_exc:  # noqa: BLE001
+            logger.warning("Runtime error callback failed: %s", callback_exc)
+            return False
+
+    if not output.strip():
+        repair_started = _report_runtime_error("Copilot CLI returned an empty orchestrator response.")
+        if repair_started:
+            output = "⚠️ I did not receive a model response. Automatic self-repair has started; please retry in a moment."
+        else:
+            output = "⚠️ I did not receive a model response. Please retry in a moment or run /repair."
+    elif output.lower().startswith("error:"):
+        _report_runtime_error(output)
 
     # After the prompt completes, discover the session ID so we can
     # resume this conversation next time.  We always try to discover
@@ -578,6 +607,8 @@ def _cmd_task_detail(tm: Optional[TaskManager], pool: Optional[WorkerPool], task
     ]
     if task.plan:
         lines.append(f"\n**Plan:**\n{task.plan}")
+    else:
+        lines.append(f"\n**Prompt:**\n{(task.prompt or '')[:1200]}")
     lines.append(f"\n**Timeline (last 10):**\n{task.concise_timeline(10)}")
     return ChatResponse(text="\n".join(lines))
 
@@ -590,7 +621,9 @@ def _cmd_proposed(tm: Optional[TaskManager]) -> ChatResponse:
     lines = []
     for t in proposed:
         age = _time_ago(t.created_at)
-        lines.append(f"📋 **{t.name}** (`{t.task_id}`) — proposed {age}\n   Plan: {(t.plan or 'N/A')[:100]}")
+        summary = (t.plan or t.prompt or "N/A")[:100]
+        summary_label = "Plan" if t.plan else "Prompt"
+        lines.append(f"📋 **{t.name}** (`{t.task_id}`) — proposed {age}\n   {summary_label}: {summary}")
     header = f"📋 **{len(proposed)} proposal(s) awaiting approval:**\n"
     return ChatResponse(text=header + "\n\n".join(lines))
 

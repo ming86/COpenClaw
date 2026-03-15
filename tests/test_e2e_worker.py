@@ -5,7 +5,7 @@ needing the actual CLI installed. Tests cover:
 - Worker lifecycle (start, output streaming, completion, errors)
 - Supervisor lifecycle (start, periodic checks, completion detection)
 - Full task flow via MCPProtocolHandler (propose → approve → worker → supervisor)
-- Inter-session messaging (inbox/outbox, task_check_inbox, task_send_input)
+- Inter-session messaging (relaunch/resume delivery, outbox history)
 - Deferred completion (worker says done but supervisor verifies first)
 - Task cancellation
 """
@@ -31,7 +31,10 @@ from copenclaw.core.worker import (
     SupervisorThread,
     _write_instructions_file,
 )
-from copenclaw.core.templates import worker_template, supervisor_template
+from copenclaw.core.templates import (
+    worker_template,
+    supervisor_template,
+)
 from copenclaw.core.scheduler import Scheduler
 from copenclaw.core.policy import ExecutionPolicy
 from copenclaw.mcp.protocol import MCPProtocolHandler
@@ -139,7 +142,7 @@ class TestInstructionsFile:
         )
         assert "task-abc123" in result
         assert "Build a hello world app" in result
-        assert "files_read" in result
+        assert "built-in file" in result.lower() or "built-in file" in result
         assert "task_report" in result
 
     def test_supervisor_template_formats(self):
@@ -147,14 +150,16 @@ class TestInstructionsFile:
             task_id="task-abc123",
             prompt="Build a hello world app",
             worker_session_id="session-xyz",
-            supervisor_instructions="Check that hello.py exists",
             workspace_root="/tmp/workspace",
         )
         assert "task-abc123" in result
         assert "session-xyz" in result
         assert "Build a hello world app" in result
-        assert "Check that hello.py exists" in result
-
+        assert "Static Supervisor Evaluation Criteria" in result
+        assert "duplicate code" in result
+        assert "implementation quality" in result
+        assert "meaningful tests" in result
+        assert "implementation depth" in result or "deep implementation" in result
 
 # ── Test: WorkerThread lifecycle ─────────────────────────────
 
@@ -240,6 +245,41 @@ class TestWorkerLifecycle:
         worker.start()
         worker._thread.join(timeout=5)
 
+        assert len(complete_results) == 1
+        assert "ERROR (exit 1)" in complete_results[0][1]
+
+    @patch("copenclaw.core.worker.subprocess.Popen")
+    @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")
+    def test_worker_terminates_startup_no_warnings_burst(self, mock_which, mock_popen, tmp_path):
+        """Repeated startup unknown-option lines should trigger worker self-termination."""
+        working_dir = str(tmp_path / "work")
+        os.makedirs(working_dir)
+
+        process = FakeProcess(
+            [
+                "error: unknown option '--no-warnings'",
+                "Try 'copilot --help' for more information.",
+                "error: unknown option '--no-warnings'",
+                "error: unknown option '--no-warnings'",
+            ],
+            exit_code=1,
+        )
+        mock_popen.return_value = process
+
+        complete_results = []
+        worker = WorkerThread(
+            task_id="task-no-warnings",
+            prompt="Reproduce no-warnings issue",
+            working_dir=working_dir,
+            mcp_server_url="http://127.0.0.1:18790/mcp",
+            on_complete=lambda tid, text: complete_results.append((tid, text)),
+        )
+        worker.start()
+        worker._thread.join(timeout=5)
+
+        with open(worker.worker_log_path, "r", encoding="utf-8") as handle:
+            worker_log = handle.read()
+        assert "terminating worker process" in worker_log.lower()
         assert len(complete_results) == 1
         assert "ERROR (exit 1)" in complete_results[0][1]
 
@@ -353,7 +393,6 @@ class TestSupervisorLifecycle:
             mcp_server_url="http://127.0.0.1:18790/mcp",
             check_interval=1,
             timeout=5,
-            supervisor_instructions="Verify output exists",
             working_dir=working_dir,
         )
 
@@ -365,7 +404,6 @@ class TestSupervisorLifecycle:
             task_id="task-sup1",
             prompt="Watch the worker",
             worker_session_id="session-w1",
-            supervisor_instructions="Verify output exists",
             workspace_root="/tmp/workspace",
         )
         _write_instructions_file(sup_dir, instructions)
@@ -375,7 +413,7 @@ class TestSupervisorLifecycle:
         with open(path, encoding="utf-8") as f:
             content = f.read()
         assert "task-sup1" in content or "supervisor" in content.lower()
-        assert "Verify output exists" in content
+        assert "Static Supervisor Evaluation Criteria" in content
 
     @patch("copenclaw.integrations.copilot_cli.CopilotCli.run_prompt")
     @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")
@@ -704,8 +742,6 @@ class TestE2ETaskFlow:
         # Step 1: Propose
         result = self._call_tool(handler, "tasks_propose", {
             "prompt": "Create a hello.py file",
-            "plan": "- Create hello.py\n- Test it",
-            "supervisor_instructions": "Verify hello.py exists",
         })
         assert result["status"] == "proposed"
         task_id = result["task_id"]
@@ -728,6 +764,76 @@ class TestE2ETaskFlow:
         assert "Starting work" in logs["logs"]
 
     @patch("copenclaw.mcp.protocol.TelegramAdapter")
+    def test_tasks_propose_telegram_notification_uses_emojis(self, mock_telegram, tmp_path):
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        handler = self._make_handler(data_dir, telegram_token="fake-token")
+
+        result = self._call_tool(handler, "tasks_propose", {
+            "prompt": "Build a small script and validate it",
+            "channel": "telegram",
+            "target": "999",
+        })
+        assert result["status"] == "proposed"
+
+        mock_telegram.return_value.send_message.assert_called_once()
+        kwargs = mock_telegram.return_value.send_message.call_args.kwargs
+        assert kwargs.get("chat_id") == 999
+        text = kwargs.get("text", "")
+        assert "📋" in text
+        assert "📝 Expanded request" in text
+        assert "✅ Reply Yes to approve" in text
+        assert "❌ Reply No to reject" in text
+
+    def test_tasks_propose_uses_default_channel_target_context(self, tmp_path):
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        handler = self._make_handler(data_dir)
+        mirrored: list[tuple[str, str, str]] = []
+        handler.notify_callback = lambda channel, target, text, service_url="": mirrored.append((channel, target, text))
+        handler.set_default_channel_target("terminal", "terminal-console")
+
+        result = self._call_tool(handler, "tasks_propose", {
+            "prompt": "Investigate issue and propose fix",
+        })
+        assert result["status"] == "proposed"
+
+        task = handler.task_manager.get(result["task_id"])
+        assert task is not None
+        assert task.channel == "terminal"
+        assert task.target == "terminal-console"
+        assert mirrored
+        assert mirrored[-1][0] == "terminal"
+        assert mirrored[-1][1] == "terminal-console"
+
+    def test_task_report_notify_uses_notify_callback(self, tmp_path):
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        handler = self._make_handler(data_dir)
+        mirrored: list[tuple[str, str, str]] = []
+        handler.notify_callback = lambda channel, target, text, service_url="": mirrored.append((channel, target, text))
+
+        task = handler.task_manager.create_task(
+            name="notify-test",
+            prompt="do work",
+            channel="telegram",
+            target="12345",
+            auto_supervise=False,
+            status="running",
+        )
+
+        result = self._call_tool(handler, "task_report", {
+            "task_id": task.task_id,
+            "type": "progress",
+            "summary": "Progress update",
+            "notify_user": True,
+            "from_tier": "worker",
+        })
+        assert result["status"] == "reported"
+        assert mirrored
+        assert mirrored[-1][0] == "telegram"
+        assert "Task 'notify-test'" in mirrored[-1][2]
+
     def test_approve_requires_token(self, mock_telegram, tmp_path):
         """Direct tasks_approve without proposal approval token should fail."""
         data_dir = str(tmp_path / "data")
@@ -1052,7 +1158,7 @@ class TestInterSessionMessaging:
         assert result["messages"] == []
 
     def test_supervisor_sends_input_to_worker(self, tmp_path):
-        """Supervisor sends input → worker reads it from inbox."""
+        """Supervisor input triggers worker relaunch and still records inbox history."""
         data_dir = str(tmp_path / "data")
         os.makedirs(data_dir)
         handler = self._make_handler(data_dir)
@@ -1060,12 +1166,16 @@ class TestInterSessionMessaging:
         task = handler.task_manager.create_task(name="ITC test", prompt="test")
         handler.task_manager.update_status(task.task_id, "running")
 
-        # Supervisor sends input to worker
-        send_result = self._call_tool(handler, "task_send_input", {
-            "task_id": task.task_id,
-            "content": "You need to add error handling to the main function",
-        })
+        with patch.object(handler.worker_pool, "start_worker") as mock_start_worker:
+            # Supervisor sends input to worker
+            send_result = self._call_tool(handler, "task_send_input", {
+                "task_id": task.task_id,
+                "content": "You need to add error handling to the main function",
+            })
         assert send_result["status"] == "sent"
+        assert send_result["worker_relaunched"] is True
+        assert mock_start_worker.call_count == 1
+        assert "error handling" in mock_start_worker.call_args.kwargs["prompt"]
 
         # Worker checks inbox
         inbox_result = self._call_tool(handler, "task_check_inbox", {"task_id": task.task_id})
@@ -1080,7 +1190,7 @@ class TestInterSessionMessaging:
         assert len(inbox_result2["messages"]) == 0
 
     def test_orchestrator_sends_instruction_to_worker(self, tmp_path):
-        """Orchestrator sends instruction → worker reads it."""
+        """Orchestrator instruction triggers worker relaunch with injected prompt context."""
         data_dir = str(tmp_path / "data")
         os.makedirs(data_dir)
         handler = self._make_handler(data_dir)
@@ -1088,13 +1198,17 @@ class TestInterSessionMessaging:
         task = handler.task_manager.create_task(name="Orch msg test", prompt="test")
         handler.task_manager.update_status(task.task_id, "running")
 
-        # Orchestrator sends instruction
-        send_result = self._call_tool(handler, "tasks_send", {
-            "task_id": task.task_id,
-            "msg_type": "instruction",
-            "content": "Please also add a README",
-        })
+        with patch.object(handler.worker_pool, "start_worker") as mock_start_worker:
+            # Orchestrator sends instruction
+            send_result = self._call_tool(handler, "tasks_send", {
+                "task_id": task.task_id,
+                "msg_type": "instruction",
+                "content": "Please also add a README",
+            })
         assert send_result["status"] == "sent"
+        assert send_result["worker_relaunched"] is True
+        assert mock_start_worker.call_count == 1
+        assert "README" in mock_start_worker.call_args.kwargs["prompt"]
 
         # Worker checks inbox
         inbox_result = self._call_tool(handler, "task_check_inbox", {"task_id": task.task_id})
@@ -1438,30 +1552,32 @@ class TestAuditRoleContext:
         content = response["result"]["content"][0]["text"]
         return json.loads(content)
 
-    def test_files_write_audit_includes_role_and_task(self, tmp_path):
-        """files_write called by a worker should log 'worker.files.write' with task_id."""
+    def test_task_report_audit_includes_role_and_task(self, tmp_path):
+        """task_report called by a worker should log role-prefixed audit with task context."""
         data_dir = str(tmp_path / "data")
         os.makedirs(data_dir)
         handler = self._make_handler(data_dir)
 
         task = handler.task_manager.create_task(name="Audit test", prompt="test")
+        handler.task_manager.update_status(task.task_id, "running")
 
         self._call_tool_with_context(
-            handler, "files_write", {"path": "note.txt", "content": "hello"},
+            handler,
+            "task_report",
+            {"task_id": task.task_id, "type": "progress", "summary": "Step 1", "from_tier": "worker"},
             task_id=task.task_id, role="worker",
         )
 
-        # Read audit.jsonl
         import json
         audit_path = os.path.join(data_dir, "audit.jsonl")
         assert os.path.exists(audit_path)
         with open(audit_path, "r") as f:
             events = [json.loads(line) for line in f if line.strip()]
 
-        file_events = [e for e in events if "files.write" in e["type"]]
-        assert len(file_events) >= 1
-        last = file_events[-1]
-        assert last["type"] == "worker.files.write"
+        report_events = [e for e in events if "task.report" in e["type"]]
+        assert len(report_events) >= 1
+        last = report_events[-1]
+        assert last["type"] == "worker.task.report.progress"
         assert last["payload"]["task_id"] == task.task_id
         assert last["payload"]["task_name"] == "Audit test"
 
@@ -1471,8 +1587,9 @@ class TestAuditRoleContext:
         os.makedirs(data_dir)
         handler = self._make_handler(data_dir)
 
-        self._call_tool_with_context(
-            handler, "files_write", {"path": "note2.txt", "content": "test"},
+        handler.handle_request(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "app_restart", "arguments": {"reason": "audit test"}}},
         )
 
         import json
@@ -1480,32 +1597,8 @@ class TestAuditRoleContext:
         with open(audit_path, "r") as f:
             events = [json.loads(line) for line in f if line.strip()]
 
-        file_events = [e for e in events if "files.write" in e["type"]]
-        assert file_events[-1]["type"] == "orchestrator.files.write"
-
-    def test_task_report_audit_includes_role(self, tmp_path):
-        """task_report audit events should be prefixed with role."""
-        data_dir = str(tmp_path / "data")
-        os.makedirs(data_dir)
-        handler = self._make_handler(data_dir)
-
-        task = handler.task_manager.create_task(name="Report audit", prompt="test")
-        handler.task_manager.update_status(task.task_id, "running")
-
-        self._call_tool_with_context(
-            handler, "task_report",
-            {"task_id": task.task_id, "type": "progress", "summary": "Step 1", "from_tier": "worker"},
-            task_id=task.task_id, role="worker",
-        )
-
-        import json
-        audit_path = os.path.join(data_dir, "audit.jsonl")
-        with open(audit_path, "r") as f:
-            events = [json.loads(line) for line in f if line.strip()]
-
-        report_events = [e for e in events if "task.report" in e["type"]]
-        assert len(report_events) >= 1
-        assert report_events[-1]["type"] == "worker.task.report.progress"
+        restart_events = [e for e in events if e["type"].endswith("app.restart")]
+        assert restart_events[-1]["type"] == "orchestrator.app.restart"
 
     @patch("copenclaw.mcp.protocol.TelegramAdapter")
     def test_send_message_audit_includes_details(self, mock_telegram, tmp_path):
@@ -1603,10 +1696,10 @@ class TestSendMessageVisibility:
             handler, "tasks_status", {"task_id": task.task_id}
         )
         assert "Sent user message" in status["timeline"]
-# ── Test: files_write MCP tool (Fix 3b) ─────────────────────
+# ── Test: duplicate MCP file tools removed ───────────────────
 
-class TestFilesWrite:
-    """Tests for the files_write MCP tool."""
+class TestDuplicateFileToolsRemoved:
+    """files_read/files_write should not be exposed as MCP tools."""
 
     def _make_handler(self, data_dir: str) -> MCPProtocolHandler:
         tm = TaskManager(data_dir=data_dir)
@@ -1621,66 +1714,7 @@ class TestFilesWrite:
             execution_policy=policy,
         )
 
-    def _call_tool(self, handler, tool_name, args):
-        response = handler.handle_request(
-            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-             "params": {"name": tool_name, "arguments": args}},
-        )
-        import json
-        content = response["result"]["content"][0]["text"]
-        return json.loads(content)
-
-    def test_write_relative_path(self, tmp_path):
-        """files_write with relative path creates file inside data_dir."""
-        data_dir = str(tmp_path / "data")
-        os.makedirs(data_dir)
-        handler = self._make_handler(data_dir)
-
-        result = self._call_tool(handler, "files_write", {
-            "path": "test-output/hello.txt",
-            "content": "Hello, world!",
-        })
-        assert result["status"] == "written"
-        assert result["size"] == 13
-
-        written = os.path.join(data_dir, "test-output", "hello.txt")
-        assert os.path.exists(written)
-        with open(written, "r") as f:
-            assert f.read() == "Hello, world!"
-
-    def test_write_outside_data_dir_allowed_with_warning(self, tmp_path):
-        """files_write should allow paths outside data_dir (with a warning log)."""
-        data_dir = str(tmp_path / "data")
-        os.makedirs(data_dir)
-        handler = self._make_handler(data_dir)
-
-        # Use a safe temp path rather than ../../etc/passwd
-        outside_path = str(tmp_path / "outside" / "test.txt")
-        response = handler.handle_request(
-            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-"params": {"name": "files_write", "arguments": {"path": outside_path, "content": "hello"}}},
-        )
-        content = response["result"]["content"][0]["text"]
-        assert response["result"]["isError"] is False
-        assert os.path.exists(outside_path)
-        with open(outside_path) as f:
-            assert f.read() == "hello"
-
-    def test_write_creates_parent_dirs(self, tmp_path):
-        """files_write should auto-create parent directories."""
-        data_dir = str(tmp_path / "data")
-        os.makedirs(data_dir)
-        handler = self._make_handler(data_dir)
-
-        result = self._call_tool(handler, "files_write", {
-            "path": "deep/nested/dir/file.py",
-            "content": "print('hello')",
-        })
-        assert result["status"] == "written"
-        assert os.path.exists(os.path.join(data_dir, "deep", "nested", "dir", "file.py"))
-
-    def test_files_write_listed_in_tools(self, tmp_path):
-        """files_write should appear in tools/list."""
+    def test_files_tools_not_listed_and_not_callable(self, tmp_path):
         data_dir = str(tmp_path / "data")
         os.makedirs(data_dir)
         handler = self._make_handler(data_dir)
@@ -1689,7 +1723,15 @@ class TestFilesWrite:
             "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {},
         })
         tool_names = [t["name"] for t in response["result"]["tools"]]
-        assert "files_write" in tool_names
+        assert "files_read" not in tool_names
+        assert "files_write" not in tool_names
+
+        call_response = handler.handle_request(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "files_write", "arguments": {"path": "x.txt", "content": "x"}}},
+        )
+        assert call_response["result"]["isError"] is True
+        assert "Unknown tool: files_write" in call_response["result"]["content"][0]["text"]
 
 # ── Test: CopilotCli add_dirs (Fix 3a) ──────────────────────
 
@@ -1752,68 +1794,50 @@ class TestCopilotCliAddDirs:
         assert "--autopilot" not in cmd
 
     @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")
-    def test_subprocess_launch_uses_explicit_cli_fallback(self, mock_which, tmp_path):
+    def test_subprocess_launch_is_cli_only(self, mock_which, tmp_path):
         from copenclaw.integrations.copilot_cli import CopilotCli
 
-        cli = CopilotCli(
-            workspace_dir=str(tmp_path),
-            execution_backend="api",
-            allow_cli_fallback=True,
-        )
+        cli = CopilotCli(workspace_dir=str(tmp_path))
         cmd = cli.build_launch_command(require_subprocess=True)
         assert cmd[0] == "copilot"
         assert "--no-ask-user" in cmd
 
     @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")
-    def test_subprocess_launch_requires_explicit_fallback(self, mock_which, tmp_path):
-        from copenclaw.integrations.copilot_cli import CopilotCli, CopilotCliError
-
-        cli = CopilotCli(
-            workspace_dir=str(tmp_path),
-            execution_backend="api",
-            allow_cli_fallback=False,
-        )
-        with pytest.raises(CopilotCliError, match="subprocess launch"):
-            cli.build_launch_command(require_subprocess=True)
-
-    @patch("copenclaw.integrations.copilot_cli.subprocess.Popen")
-    @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")
-    def test_run_prompt_api_backend_falls_back_to_cli(self, mock_which, mock_popen, tmp_path):
+    def test_subprocess_launch_ignores_legacy_api_flags(self, mock_which, tmp_path):
         from copenclaw.integrations.copilot_cli import CopilotCli
 
-        mock_popen.return_value = FakeProcess(["api fallback ok"], exit_code=0)
-        cli = CopilotCli(
-            workspace_dir=str(tmp_path),
-            execution_backend="api",
-            allow_cli_fallback=True,
-        )
-        output = cli.run_prompt("test prompt")
-        assert "api fallback ok" in output
-
-    @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")
-    def test_run_prompt_api_backend_without_fallback_raises(self, mock_which, tmp_path):
-        from copenclaw.integrations.copilot_cli import CopilotCli, CopilotCliError
-
         cli = CopilotCli(
             workspace_dir=str(tmp_path),
             execution_backend="api",
             allow_cli_fallback=False,
         )
-        with pytest.raises(CopilotCliError, match="SDK backend unavailable"):
-            cli.run_prompt("test prompt")
+        cmd = cli.build_launch_command(require_subprocess=True)
+        assert cmd[0] == "copilot"
+        assert not hasattr(cli, "execution_backend")
+        assert not hasattr(cli, "allow_cli_fallback")
 
-# ── Test: Worker instructions mention files_write (Fix 3d) ───
+    @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")
+    def test_run_prompt_ignores_api_backend_override(self, mock_which, tmp_path):
+        from copenclaw.integrations.copilot_cli import CopilotCli
+
+        cli = CopilotCli(workspace_dir=str(tmp_path), execution_backend="api", allow_cli_fallback=False)
+        with patch.object(cli, "_run_prompt_cli", return_value="cli only") as run_cli:
+            output = cli.run_prompt("test prompt", execution_backend="api")
+        assert output == "cli only"
+        run_cli.assert_called_once()
+
+# ── Test: Worker instructions mention built-in tools ─────────
 
 class TestWorkerInstructionsUpdated:
-    """Worker instructions should mention files_write and built-in file tools."""
+    """Worker instructions should prefer built-in file tools."""
 
-    def test_worker_template_mentions_files_write(self):
+    def test_worker_template_does_not_mention_files_write(self):
         result = worker_template(
             task_id="task-test",
             prompt="test prompt",
             workspace_root="/tmp/workspace",
         )
-        assert "files_write" in result
+        assert "files_write" not in result
 
     def test_worker_template_mentions_builtin_file_tools(self):
         result = worker_template(
@@ -1829,8 +1853,8 @@ class TestWorkerInstructionsUpdated:
             prompt="test prompt",
             workspace_root="/tmp/workspace",
         )
-        assert "wait loop" in result.lower() or "wait loop" in result
-        assert "task_check_inbox" in result
+        assert "relaunch" in result.lower()
+        assert "task_check_inbox" not in result
 
 # ── Test: Stuck-detection and auto-finalization ──────────────
 
@@ -1886,9 +1910,8 @@ class TestStuckDetection:
         assert task.supervisor_assessment_count == 1
         assert task.status != "completed"
 
-        # Second assessment with negative signal — should auto-complete
-        # because worker is dead (not in pool) and count >= 2
-        # BUT it has strong_negative so it should NOT auto-complete
+        # Second assessment with negative signal — should NOT auto-complete.
+        # It is below auto-finalize threshold and has strong_negative signals.
         self._call_tool(handler, "task_report", {
             "task_id": task.task_id,
             "type": "assessment",
@@ -1902,7 +1925,7 @@ class TestStuckDetection:
         assert task.status != "completed"
 
     def test_stuck_assessment_auto_completes_without_negative(self, tmp_path):
-        """After 2+ assessments with no strong negative and dead worker, auto-complete."""
+        """After 10+ assessments with no strong negative and dead worker, auto-complete."""
         data_dir = str(tmp_path / "data")
         os.makedirs(data_dir)
         handler = self._make_handler(data_dir)
@@ -1913,10 +1936,10 @@ class TestStuckDetection:
         handler.task_manager.update_status(task.task_id, "running")
         task.completion_deferred = True
         task.completion_deferred_summary = "All work done"
-        task.supervisor_assessment_count = 1  # Pre-set to 1
+        task.supervisor_assessment_count = 9  # Pre-set so next assessment reaches threshold
         handler.task_manager._save()
 
-        # Second assessment with neutral/positive signal and dead worker
+        # Next assessment with neutral/positive signal and dead worker
         self._call_tool(handler, "task_report", {
             "task_id": task.task_id,
             "type": "assessment",
@@ -1925,9 +1948,36 @@ class TestStuckDetection:
         }, task_id=task.task_id, role="supervisor")
 
         task = handler.task_manager.get(task.task_id)
-        # Should be auto-completed: count >= 2, no strong negative, worker dead
+        # Should be auto-completed: count >= 10, no strong negative, worker dead
         assert task.status == "completed"
         assert task.supervisor_assessment_count == 0  # Reset after completion
+
+    def test_stuck_assessment_auto_fails_with_negative(self, tmp_path):
+        """After 10+ negative assessments with dead worker, auto-finalize as failed."""
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        handler = self._make_handler(data_dir)
+
+        task = handler.task_manager.create_task(
+            name="Auto-fail test", prompt="test", auto_supervise=True,
+        )
+        handler.task_manager.update_status(task.task_id, "running")
+        task.completion_deferred = True
+        task.completion_deferred_summary = "Work done"
+        task.supervisor_assessment_count = 9
+        handler.task_manager._save()
+
+        self._call_tool(handler, "task_report", {
+            "task_id": task.task_id,
+            "type": "assessment",
+            "summary": "Still incomplete and missing key outputs",
+            "from_tier": "supervisor",
+        }, task_id=task.task_id, role="supervisor")
+
+        task = handler.task_manager.get(task.task_id)
+        assert task.status == "failed"
+        assert task.completion_deferred is False
+        assert task.supervisor_assessment_count == 0
 
     def test_worker_activity_tracking(self, tmp_path):
         """Worker MCP calls should update last_worker_activity_at."""
@@ -1976,6 +2026,96 @@ class TestStuckDetection:
         assert "Supervisor assessments so far: 3" in logs
         assert "ACTION REQUIRED" in logs  # Worker not running + deferred
 
+    def test_tasks_status_does_not_expose_worker_pid(self, tmp_path):
+        """tasks_status should not return raw worker PID values."""
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        handler = self._make_handler(data_dir)
+
+        task = handler.task_manager.create_task(
+            name="Status pid redaction", prompt="test",
+        )
+        handler.task_manager.update_status(task.task_id, "running")
+        task.worker_pid = 4242
+        task.worker_child_pids = [4243, 4244]
+        task.worker_process_running = True
+        handler.task_manager._save()
+
+        status = self._call_tool(handler, "tasks_status", {"task_id": task.task_id})
+        assert "worker_pid" not in status
+        assert status["worker_child_processes"] == 2
+
+    def test_task_process_info_returns_tree_and_metrics(self, tmp_path):
+        """task_process_info should return process tree metrics for supervisors."""
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        handler = self._make_handler(data_dir)
+
+        task = handler.task_manager.create_task(
+            name="Process info", prompt="test",
+        )
+        handler.task_manager.update_status(task.task_id, "running")
+        task.worker_pid = 5001
+        task.worker_child_pids = [5002]
+        handler.task_manager._save()
+
+        with patch.object(
+            MCPProtocolHandler,
+            "_collect_process_metrics",
+            return_value=[
+                {
+                    "pid": 5001,
+                    "parent_pid": 1,
+                    "name": "copilot",
+                    "command_line": "copilot --model gpt-5",
+                    "cpu_percent": 11.5,
+                    "memory_rss_bytes": 120000,
+                    "memory_private_bytes": 90000,
+                },
+                {
+                    "pid": 5002,
+                    "parent_pid": 5001,
+                    "name": "python",
+                    "command_line": "python worker.py --watch",
+                    "cpu_percent": 3.0,
+                    "memory_rss_bytes": 64000,
+                    "memory_private_bytes": 48000,
+                },
+            ],
+        ):
+            result = self._call_tool(
+                handler,
+                "task_process_info",
+                {"task_id": task.task_id},
+                task_id=task.task_id,
+                role="supervisor",
+            )
+        assert result["root_pid"] == 5001
+        assert result["summary"]["observed_processes"] == 2
+        assert result["summary"]["child_processes"] == 1
+        child = [p for p in result["processes"] if p["pid"] == 5002][0]
+        assert child["command_line"] == "python worker.py --watch"
+
+    def test_task_process_info_restricted_to_supervisor(self, tmp_path):
+        """task_process_info must reject non-supervisor callers."""
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        handler = self._make_handler(data_dir)
+
+        task = handler.task_manager.create_task(name="Process role test", prompt="test")
+        response = handler.handle_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "task_process_info", "arguments": {"task_id": task.task_id}},
+            },
+            task_id=task.task_id,
+            role="worker",
+        )
+        assert response["result"]["isError"] is True
+        assert "supervisor sessions" in response["result"]["content"][0]["text"]
+
     def test_supervisor_explicit_completed_clears_deferred(self, tmp_path):
         """Supervisor reporting type='completed' directly should clear deferred state."""
         data_dir = str(tmp_path / "data")
@@ -2005,17 +2145,18 @@ class TestStuckDetection:
         assert task.supervisor_assessment_count == 0
 
     def test_supervisor_template_mentions_decision_deadlines(self):
-        """Supervisor template should contain decision deadline rules."""
+        """Supervisor template should describe runtime finalization behavior."""
         result = supervisor_template(
             task_id="task-test",
             prompt="test",
             worker_session_id="session-1",
-            supervisor_instructions="verify",
             workspace_root="/tmp",
         )
-        assert "DECISION DEADLINES" in result
-        assert "Do NOT report" in result
+        assert "Finalization behavior" in result
+        assert "auto-finalize" in result
         assert "assessment" in result
+        assert "duplicate code" in result
+        assert "task_process_info" in result
 
 
 class TestContinuousImprovementProtocol:

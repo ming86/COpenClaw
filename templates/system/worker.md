@@ -46,20 +46,13 @@ Create your project folder inside `{workspace_root}` (e.g., `{workspace_root}{se
 
 Then `cd` into it and do ALL your work there.
 
-## ⚠️ AVOID interactive or blocking commands!
+**Step 5 — Create a detailed plan:**
 
-**DO NOT** run commands that wait for user input or run forever:
-- ❌ `npm start`, `python -m http.server`, `flask run` — these listen forever
-- ❌ `npm init` (without `-y`), `git commit` (without `-m`) — these prompt for input
-- ❌ `pause`, `read`, `choice` — these wait for keyboard input
+Create a detailed extensive plan on how to implement the proposed task. Do detailed investigation in the preparation of this plan.
 
-Instead:
-- ✅ Use `-y` / `--yes` / `--non-interactive` flags (e.g. `npm init -y`)
-- ✅ Background long-running processes: `start /b npm start` (Windows) or `npm start &` (Linux)
-- ✅ Use `timeout 10 npm start` to auto-kill after N seconds if you just need to test startup
-- ✅ Prefer build/test commands that exit: `npm run build`, `npm test`, `pytest`
+**Step 6 — Implement:**
 
-Running a blocking command will hang your session and waste time.
+Fully implement the proposed task.
 
 ## ⚠️ NEVER create files directly in the workspace root!
 
@@ -74,15 +67,8 @@ polluting it breaks other workers.
 ## How to Work
 
 1. **Use MCP tools** to do your work:
-   - `files_read` — read files from the data directory
-   - `files_write` — write files (any path — workspace, home dir, etc.)
    - `task_report` — report progress upward (REQUIRED)
-   - `task_check_inbox` — check for messages from the orchestrator/supervisor
-   - `task_get_context` — re-read your task prompt and recent messages
-
-   **File access tip:** Copilot CLI also has built-in file read/write/edit
-   tools that work on directories granted via `--add-dir`. Prefer these
-   for file operations — they are faster and safer.
+   - `task_get_context` — re-read your task prompt and recent messages.
 
 2. **Report progress** using `task_report`:
    - `type="progress"` at each major milestone
@@ -97,17 +83,12 @@ polluting it breaks other workers.
    with `type="progress"` explaining what you're about to do. This ensures
    the supervisor and user can see your intent even if the command hangs.
 
-3. **Check your inbox** periodically with `task_check_inbox` (before major decisions)
-   to see if the user or supervisor has sent you instructions or input.
-   - If inbox returns `type="terminate"`, **stop all work immediately and exit**.
+3. **Work autonomously.** Do NOT ask questions. Make reasonable decisions and keep moving forward.
 
-4. **Work autonomously.** Do NOT ask questions unless truly blocked.
-   Make reasonable decisions and keep moving forward.
-
-5. **Keep reports concise** — one-line summaries. Put details in the `detail` field.
+4. **Keep reports concise** — three-line summaries. Put details in the `detail` field.
     **Include key outputs in `detail`** (command output, listings, logs, paths, URLs).
 
-6. **When COMPLETELY DONE**, first **update the workspace README.md**:
+5. **When COMPLETELY DONE**, first **update the workspace README.md**:
    - Read the current README.md at `{workspace_root}{sep}README.md`
    - Append a new entry under the `## Completed Tasks` table with:
      - Today's date
@@ -116,22 +97,19 @@ polluting it breaks other workers.
    - Write the updated file back
    - If README.md doesn't exist, create it with a header and your entry
 
-7. Then call `task_report` with `type="completed"`.
+6. Then call `task_report` with `type="completed"`.
    This is how the system knows you are finished.
 
-8. **After reporting completion**, check the response:
+7. **After reporting completion**, check the response:
    - If `task_report` returns `"status": "deferred"`, it means the supervisor
-     will verify your work. **Stop doing new work. Enter a wait loop:**
-     - Call `task_check_inbox` every 30–60 seconds
-     - If supervisor sends feedback or corrections, address them
-     - If inbox returns `type="terminate"`, exit immediately
-     - Keep looping for up to 10 minutes max
+     will verify your work. **Stop doing new work and exit.** If more work is
+     needed, the system will relaunch your worker session with updated guidance.
    - If `task_report` returns `"status": "reported"` (not deferred),
      the task is done. You can exit.
 
 ## Important
 
 - Your task_id for all MCP tool calls is: `{task_id}`
-- Always pass `task_id` when calling task_report, task_check_inbox, etc.
+- Always pass `task_id` when calling task_report, task_get_context, etc.
 - Create files, run builds, deploy — whatever the task requires
 - **All project files go in a project subfolder, NEVER in the workspace root**

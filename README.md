@@ -137,7 +137,7 @@ From chat:
 
 ## GitHub Copilot CLI — The Brain
 
-COpenClaw delegates **all AI reasoning** to [GitHub Copilot CLI](https://docs.github.com/en/copilot/github-copilot-in-the-cli). Session execution is **API-first** (Copilot SDK path) with explicit, logged fallback to CLI subprocess mode when needed; autopilot mode is enabled by default. This gives you the full power of Copilot CLI remotely:
+COpenClaw delegates **all AI reasoning** to [GitHub Copilot CLI](https://docs.github.com/en/copilot/github-copilot-in-the-cli). Session execution uses the standard **Copilot CLI subprocess wrapper path only** (no SDK backend selection); autopilot mode is enabled by default. This gives you the full power of Copilot CLI remotely:
 
 - **Vibe coding** — describe an application in natural language and Copilot CLI builds it: creates files, writes code, installs dependencies, runs the app, iterates on feedback
 - **Git operations** — commit, push, branch, merge, revert, rebase, view history, all via natural language
@@ -275,19 +275,16 @@ COpenClaw uses a **3-tier autonomous task architecture**:
 
 | Tier | Role | Session | Key Tools |
 |---|---|---|---|
-| **Orchestrator** | User-facing brain. Routes messages, proposes tasks | Persistent, resumes across restarts | `tasks_create`, `tasks_list`, `send_message`, `jobs_schedule` |
-| **Worker** | Executes a task autonomously in a background thread | Per-task, isolated workspace | `task_report`, `task_check_inbox`, `task_set_status`, `files_read` |
+| **Orchestrator** | User-facing brain. Routes messages, proposes tasks | Persistent, resumes across restarts | `tasks_create`, `tasks_list`, `send_message`, `scheduled_tasks_schedule` |
+| **Worker** | Executes a task autonomously in a background thread | Per-task, isolated workspace | `task_report`, `task_set_status`, `task_get_context` |
 | **Supervisor** | Periodically checks on worker, intervenes if stuck | Per-task | `task_read_peer`, `task_send_input`, `task_report` |
 
 **Bidirectional ITC (Inter-Tier Communication):**
 
 ```
+     tasks_send / task_send_input
+              ──▶ stop+resume worker session with injected message prompt
                     ┌──────────────┐
-     tasks_send ──▶ │    INBOX     │ ──▶ task_check_inbox
-  (instruction,     │  (per task)  │     (worker reads)
-   input, pause,    └──────────────┘
-   resume, cancel,
-   redirect)        ┌──────────────┐
                     │   OUTBOX     │ ◀── task_report
   tasks_status ◀── │  (per task)  │     (progress, completed,
   tasks_logs   ◀── │  + timeline  │      failed, needs_input,
@@ -541,12 +538,11 @@ Or add to `~/.copilot/mcp-config.json`:
 
 | Tool | Description |
 |---|---|
-| `jobs_schedule` | Schedule a one-shot or cron job |
-| `jobs_list` | List all jobs |
-| `jobs_runs` | Job execution history |
-| `jobs_cancel` | Cancel a job |
+| `scheduled_tasks_schedule` | Schedule a one-shot or cron task |
+| `scheduled_tasks_list` | List all scheduled tasks |
+| `scheduled_tasks_runs` | Scheduled task execution history |
+| `scheduled_tasks_cancel` | Cancel a scheduled task |
 | `send_message` | Send a message to any channel |
-| `files_read` | Read a file under data_dir |
 | `audit_read` | Read audit log entries |
 
 ### Task dispatch tools (orchestrator)
@@ -557,21 +553,21 @@ Or add to `~/.copilot/mcp-config.json`:
 | `tasks_list` | List tasks with status |
 | `tasks_status` | Detailed status with timeline |
 | `tasks_logs` | Raw worker session logs |
-| `tasks_send` | Send instruction/input/pause/resume/cancel to worker |
+| `tasks_send` | Send task message; instruction/input/redirect relaunch worker with resumed session context |
 | `tasks_cancel` | Cancel a running task |
 
-For `task_type="continuous_improvement"`, terminal iterations now auto-chain by default: COpenClaw creates and dispatches the next iteration with mission handoff context and a rotated focus direction (`ux`, `reliability`, `performance`, `quality`, `safety`, `observability`, `docs`). Use continuous config keys `auto_chain_enabled`, `auto_chain_max_generations`, `auto_chain_failure_limit`, and `auto_chain_failure_backoff_seconds` to tune guardrails.
+For `task_type="continuous_improvement"`, terminal iterations auto-chain by default: COpenClaw creates and dispatches the next iteration with mission handoff context and a rotated focus direction (`ux`, `reliability`, `performance`, `quality`, `safety`, `observability`, `docs`). Use continuous config keys `auto_chain_enabled`, `auto_chain_max_generations`, `auto_chain_failure_limit`, and `auto_chain_failure_backoff_seconds` to tune guardrails.
 
 ### Task ITC tools (worker/supervisor)
 
 | Tool | Description |
 |---|---|
 | `task_report` | Report progress/completion/failure upward |
-| `task_check_inbox` | Check for instructions from orchestrator/supervisor |
+| `task_check_inbox` | Read queued downward messages (legacy compatibility / diagnostics) |
 | `task_set_status` | Update task status |
 | `task_get_context` | Read original task prompt + recent messages |
 | `task_read_peer` | Read worker logs (supervisor only) |
-| `task_send_input` | Send guidance to worker (supervisor only) |
+| `task_send_input` | Send supervisor guidance and relaunch worker with resumed session context |
 
 ---
 
@@ -584,8 +580,6 @@ All configuration is via environment variables (or `.env` file). See [`.env.exam
 | `COPILOT_CLAW_DATA_DIR` | `.data` | Directory for jobs, sessions, tasks, audit log |
 | `COPILOT_CLAW_WORKSPACE_DIR` | `.` | Working directory for Copilot CLI |
 | `COPILOT_CLAW_CLI_TIMEOUT` | `7200` | Copilot CLI subprocess timeout (seconds) |
-| `COPILOT_CLAW_COPILOT_EXECUTION_BACKEND` | `api` | Session execution backend (`api` or `cli`) |
-| `COPILOT_CLAW_COPILOT_ALLOW_CLI_FALLBACK` | `true` | Allow explicit CLI fallback when API backend is unavailable |
 | `COPILOT_CLAW_COPILOT_AUTOPILOT_DEFAULT` | `true` | Enable Copilot autopilot mode by default for all sessions |
 | `COPILOT_CLAW_MCP_TOKEN` | *(empty)* | Bearer token to protect MCP endpoints |
 | `COPILOT_CLAW_ALLOW_ALL_COMMANDS` | `true` | Allow all shell commands (set false to use `COPILOT_CLAW_ALLOWED_COMMANDS`) |
@@ -651,9 +645,15 @@ copenclaw/
 │       ├── protocol.py        # MCP JSON-RPC handler (20+ tools)
 │       └── server.py          # MCP REST sub-router
 ├── templates/
-│   ├── orchestrator.md        # Orchestrator system prompt
-│   ├── worker.md              # Worker system prompt
-│   └── supervisor.md          # Supervisor system prompt
+│   ├── system/
+│   │   ├── orchestrator.md        # Orchestrator system prompt
+│   │   ├── worker.md              # Worker instructions system prompt
+│   │   ├── supervisor.md          # Supervisor system prompt
+│   │   ├── starter.md             # Startup recovery system prompt
+│   │   └── repair.md              # Runtime repair system prompt
+│   └── prompts/
+│       ├── worker_start_session_prompt.md  # Fresh worker-session kickoff prompt
+│       └── worker_resume_session_prompt.md # Resumed worker-session kickoff prompt
 ├── tests/                     # 265 tests
 ├── scripts/
 │   ├── configure.py           # Interactive channel configurator

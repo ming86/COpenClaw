@@ -55,5 +55,5 @@ def test_mcp_tools() -> None:
     assert response.status_code == 200
     tools = response.json()["result"]["tools"]
     names = [t["name"] for t in tools]
-    assert "jobs_schedule" in names
-    assert "jobs_cancel" in names
+    assert "scheduled_tasks_schedule" in names
+    assert "scheduled_tasks_cancel" in names

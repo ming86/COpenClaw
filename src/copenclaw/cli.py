@@ -13,6 +13,21 @@ from dotenv import load_dotenv
 from copenclaw.core.gateway import create_app
 
 app = typer.Typer(add_completion=False)
+logger = logging.getLogger("copenclaw.cli")
+_AUTO_REPAIR_ON_STARTUP_ENV = "copenclaw_AUTO_REPAIR_ON_STARTUP"
+_AUTO_REPAIR_ATTEMPTED_ENV = "copenclaw_AUTO_REPAIR_ATTEMPTED"
+
+
+def _env_true(name: str, *, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_repo_root() -> str:
+    here = Path(__file__).resolve()
+    return str(here.parents[2])
 
 def _load_env() -> None:
     load_dotenv()
@@ -24,6 +39,13 @@ def _setup_logging() -> None:
 
     settings = Settings.from_env()
     setup_logging(log_dir=settings.log_dir, log_level=settings.log_level, clear_on_launch=settings.clear_logs_on_launch)
+
+
+def _effective_log_level(settings: object) -> str:
+    configured = getattr(settings, "log_level", None)
+    if isinstance(configured, str) and configured.strip():
+        return configured
+    return "warning" if os.name == "nt" else "info"
 
 @app.command()
 def serve(
@@ -39,7 +61,64 @@ def serve(
     check_or_prompt(allow_flag=accept_risks)
 
     _setup_logging()
-    uvicorn.run("copenclaw.core.gateway:create_app", host=host, port=port, reload=reload, factory=True)
+
+    def _run_once() -> None:
+        from copenclaw.core.config import Settings
+        settings = Settings.from_env()
+        log_level = _effective_log_level(settings)
+
+        if not _env_true("copenclaw_SKIP_STARTER", default=False):
+            from copenclaw.core.starter import run_startup_starter
+            workspace_root = os.path.abspath(settings.workspace_dir or os.getcwd())
+            repo_root = _resolve_repo_root()
+            logger.info("Running startup-starter session before launching server")
+            run_startup_starter(
+                host=host,
+                port=port,
+                reload=reload,
+                workspace_root=workspace_root,
+                repo_root=repo_root,
+                log_dir=settings.log_dir,
+                timeout=settings.copilot_cli_timeout,
+            )
+        access_log = _env_true("copenclaw_HTTP_ACCESS_LOG", default=(os.name != "nt"))
+        uvicorn.run(
+            "copenclaw.core.gateway:create_app",
+            host=host,
+            port=port,
+            reload=reload,
+            factory=True,
+            access_log=access_log,
+            log_level=log_level,
+        )
+
+    try:
+        _run_once()
+        return
+    except Exception as exc:
+        attempted = _env_true(_AUTO_REPAIR_ATTEMPTED_ENV, default=False)
+        enabled = _env_true(_AUTO_REPAIR_ON_STARTUP_ENV, default=True)
+        if not enabled or attempted:
+            raise
+        from copenclaw.core.config import Settings
+        from copenclaw.core.repair import run_repair
+
+        settings = Settings.from_env()
+        workspace_root = os.path.abspath(settings.workspace_dir or os.getcwd())
+        repo_root = _resolve_repo_root()
+        os.environ[_AUTO_REPAIR_ATTEMPTED_ENV] = "1"
+        logger.error("Serve startup failed; triggering automatic repair: %s", exc)
+        run_repair(
+            description=f"Automatic startup repair after serve failure: {exc}",
+            workspace_root=workspace_root,
+            repo_root=repo_root,
+            log_dir=settings.log_dir,
+            timeout=settings.copilot_cli_timeout,
+            notify=lambda msg: logger.info("AUTO-REPAIR: %s", msg),
+            attempt_cli_repair=True,
+        )
+        logger.info("Retrying serve startup after automatic repair")
+        _run_once()
 
 @app.command()
 def version() -> None:

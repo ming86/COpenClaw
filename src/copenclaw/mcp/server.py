@@ -31,12 +31,6 @@ class JobResponse(BaseModel):
     cancelled: bool = False
     cron_expr: str | None = None
 
-class ReadFileRequest(BaseModel):
-    path: str
-
-class ReadFileResponse(BaseModel):
-    content: str
-
 class RunsResponse(BaseModel):
     runs: list[dict[str, Any]]
 
@@ -89,7 +83,6 @@ def get_router(
                 {"name": "jobs.cancel", "description": "Cancel a job by ID"},
                 {"name": "jobs.clear_all", "description": "Remove all scheduled jobs"},
                 {"name": "send.message", "description": "Send a message to a channel"},
-                {"name": "files.read", "description": "Read a file under data_dir"},
                 {"name": "audit.read", "description": "Read audit log events"},
                 {"name": "tasks.clear_all", "description": "Cancel and remove all tasks"},
                 {"name": "app.restart", "description": "Restart the COpenClaw application"},
@@ -148,23 +141,6 @@ def get_router(
     @router.get("/jobs/runs", response_model=RunsResponse)
     def list_runs(job_id: str | None = None, limit: int = 50) -> RunsResponse:
         return RunsResponse(runs=scheduler.list_runs(job_id=job_id, limit=limit))
-
-    @router.post("/files/read", response_model=ReadFileResponse)
-    def files_read(req: ReadFileRequest) -> ReadFileResponse:
-        if not data_dir:
-            raise HTTPException(status_code=400, detail="data_dir not configured")
-        base = os.path.abspath(data_dir)
-        path = req.path
-        if not os.path.isabs(path):
-            path = os.path.join(base, path)
-        target = os.path.abspath(path)
-        if not target.startswith(base):
-            raise HTTPException(status_code=403, detail="path is outside allowed data_dir")
-        if not os.path.exists(target):
-            raise HTTPException(status_code=404, detail="file not found")
-        with open(target, "r", encoding="utf-8") as handle:
-            content = handle.read()
-        return ReadFileResponse(content=content)
 
     @router.get("/audit", response_model=AuditResponse)
     def audit_read(limit: int = 100) -> AuditResponse:

@@ -12,6 +12,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
+import sys
+import threading
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -55,6 +58,7 @@ _CI_DIRECTION_GUIDANCE = {
     "observability": "Improve logs, metrics, and diagnosis signals for faster debugging.",
     "docs": "Improve operator/developer documentation for maintainability and handoff.",
 }
+_SUPERVISOR_AUTO_FINALIZE_ASSESSMENT_THRESHOLD = 10
 
 
 def _is_image_path(path: str) -> bool:
@@ -64,50 +68,50 @@ def _is_image_path(path: str) -> bool:
 
 INFRA_TOOLS = [
     {
-        "name": "jobs_schedule",
-        "description": "Schedule a one-shot or recurring job. The job will execute a prompt via Copilot CLI and deliver the result to a chat channel.",
+        "name": "scheduled_tasks_schedule",
+        "description": "Schedule a one-shot or recurring scheduled task. The scheduled task will execute a prompt via Copilot CLI and deliver the result to a chat channel.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Human-readable job name"},
-                "run_at": {"type": "string", "description": "ISO-8601 datetime when the job should first run"},
-                "prompt": {"type": "string", "description": "The prompt to execute when the job fires"},
+                "name": {"type": "string", "description": "Human-readable scheduled task name"},
+                "run_at": {"type": "string", "description": "ISO-8601 datetime when the scheduled task should first run"},
+                "prompt": {"type": "string", "description": "The prompt to execute when the scheduled task fires"},
                 "channel": {"type": "string", "enum": ["telegram", "teams", "whatsapp", "signal", "slack"], "description": "Delivery channel"},
                 "target": {"type": "string", "description": "Chat ID (Telegram) or conversation ID (Teams)"},
-                "cron_expr": {"type": "string", "description": "Optional cron expression for recurring jobs"},
+                "cron_expr": {"type": "string", "description": "Optional cron expression for recurring scheduled tasks"},
                 "service_url": {"type": "string", "description": "Required for Teams channel"},
             },
             "required": ["name", "run_at", "prompt", "channel", "target"],
         },
     },
     {
-        "name": "jobs_list",
-        "description": "List all scheduled jobs with their status.",
+        "name": "scheduled_tasks_list",
+        "description": "List all scheduled tasks with their status.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
-        "name": "jobs_cancel",
-        "description": "Cancel a scheduled job by its ID.",
+        "name": "scheduled_tasks_cancel",
+        "description": "Cancel a scheduled task by its ID.",
         "inputSchema": {
             "type": "object",
-            "properties": {"job_id": {"type": "string"}},
-            "required": ["job_id"],
+            "properties": {"scheduled_task_id": {"type": "string"}},
+            "required": ["scheduled_task_id"],
         },
     },
     {
-        "name": "jobs_runs",
-        "description": "List job run history.",
+        "name": "scheduled_tasks_runs",
+        "description": "List scheduled task run history.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "job_id": {"type": "string", "description": "Filter by job ID (optional)"},
+                "scheduled_task_id": {"type": "string", "description": "Filter by scheduled task ID (optional)"},
                 "limit": {"type": "integer", "default": 50},
             },
         },
     },
     {
-        "name": "jobs_clear_all",
-        "description": "Remove all scheduled jobs (both pending and completed). Returns the count of jobs cleared.",
+        "name": "scheduled_tasks_clear_all",
+        "description": "Remove all scheduled tasks (both pending and completed). Returns the count of tasks cleared.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
@@ -123,27 +127,6 @@ INFRA_TOOLS = [
                 "service_url": {"type": "string", "description": "Required for Teams"},
             },
             "required": ["channel", "target"],
-        },
-    },
-    {
-        "name": "files_read",
-        "description": "Read a file from the data directory.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"path": {"type": "string"}},
-            "required": ["path"],
-        },
-    },
-    {
-        "name": "files_write",
-        "description": "Write content to a file within a task's workspace or the data directory. Creates parent directories as needed.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "File path (relative to data_dir, or absolute within allowed dirs)"},
-                "content": {"type": "string", "description": "File content to write"},
-            },
-            "required": ["path", "content"],
         },
     },
     {
@@ -204,24 +187,22 @@ TASK_TOOLS = [
     # ── Orchestrator-level tools ──
     {
         "name": "tasks_propose",
-        "description": "Propose a task plan for user approval. Creates a proposal that the user must approve (Yes) or reject (No) before workers are spawned. Use this for any complex multi-step work.",
+        "description": "Propose a task for user approval. Provide an expanded, self-contained prompt based on the user's request. The user must approve (Yes) or reject (No) before workers are spawned. Do not use for autonomous recovery/self-healing flows.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Human-readable task name (auto-generated if omitted)"},
-                "prompt": {"type": "string", "description": "The detailed instructions for the worker"},
-                "plan": {"type": "string", "description": "A clear bullet-point plan of what the worker will do"},
+                "prompt": {"type": "string", "description": "Expanded, self-contained worker brief based on the user's request"},
                 "channel": {"type": "string", "enum": ["telegram", "teams", "whatsapp", "signal", "slack"], "description": "Where to report results"},
                 "target": {"type": "string", "description": "Chat ID, conversation ID, phone number, or Slack channel ID for notifications"},
                 "service_url": {"type": "string", "description": "Required for Teams"},
                 "check_interval": {"type": "integer", "default": 600, "description": "Supervisor check interval in seconds"},
                 "auto_supervise": {"type": "boolean", "default": True, "description": "Whether to auto-start a supervisor"},
-                "supervisor_instructions": {"type": "string", "description": "What the supervisor should watch for"},
                 "task_type": {"type": "string", "enum": ["standard", "continuous_improvement"], "default": "standard"},
                 "continuous": {"type": "object", "description": "Continuous improvement configuration when task_type=continuous_improvement"},
                 "on_complete": {"type": "string", "description": "A prompt to feed to the orchestrator when this task finishes (success, failure, or cancellation). Use this for chaining tasks or retrying on failure. The hook prompt includes the terminal reason so the orchestrator can react appropriately."},
             },
-            "required": ["prompt", "plan"],
+            "required": ["prompt"],
         },
     },
     {
@@ -238,7 +219,7 @@ TASK_TOOLS = [
     },
     {
         "name": "tasks_create",
-        "description": "Create and immediately dispatch a task WITHOUT requiring approval. Only use for simple automated tasks or when the user has explicitly pre-approved. For complex work, use tasks_propose instead.",
+        "description": "Create and immediately dispatch a task WITHOUT requiring approval. Use for autonomous self-healing/recovery, on-complete hooks, scheduled automation, or when the user explicitly pre-approved immediate execution. For normal user-initiated complex work, use tasks_propose instead.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -293,14 +274,13 @@ TASK_TOOLS = [
     },
     {
         "name": "tasks_send",
-        "description": "Send a message to a task's worker or supervisor. If the task has stopped (completed/failed/cancelled), sending an 'instruction' or 'redirect' will auto-resume it with a new worker using the message as updated instructions. Use this to continue or redirect existing tasks.",
+        "description": "Send a message to a task. For running tasks, instruction/input/redirect trigger a worker relaunch with session resume and injected message context. For stopped tasks, instruction/redirect auto-resume work.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "task_id": {"type": "string"},
                 "msg_type": {"type": "string", "enum": ["instruction", "input", "pause", "resume", "redirect", "cancel", "priority"]},
                 "content": {"type": "string", "description": "The message content — for stopped tasks, this becomes the continuation prompt"},
-                "supervisor_instructions": {"type": "string", "description": "Updated supervisor instructions (optional, applied on resume)"},
             },
             "required": ["task_id", "msg_type", "content"],
         },
@@ -343,7 +323,7 @@ TASK_TOOLS = [
     },
     {
         "name": "task_check_inbox",
-        "description": "Check for new messages/instructions from the orchestrator or supervisor. Workers should call this periodically.",
+        "description": "Read queued downward messages for this task (legacy compatibility / diagnostics).",
         "inputSchema": {
             "type": "object",
             "properties": {"task_id": {"type": "string"}},
@@ -384,8 +364,17 @@ TASK_TOOLS = [
         },
     },
     {
+        "name": "task_process_info",
+        "description": "Inspect worker process tree details (CPU/memory/children/command lines). Supervisor only.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}},
+            "required": ["task_id"],
+        },
+    },
+    {
         "name": "task_send_input",
-        "description": "Send guidance/input from supervisor to worker (adds to worker's inbox).",
+        "description": "Send supervisor guidance to worker and trigger relaunch with the guidance injected into the resume prompt.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -433,6 +422,24 @@ class MCPProtocolHandler:
         # Callback to restart the entire app process.
         # Signature: restart_callback(reason: str) -> None
         self.restart_callback: Any = None
+        self._worker_relaunch_lock = threading.Lock()
+        self._worker_relaunch_requested: set[str] = set()
+        self._default_target_lock = threading.Lock()
+        self._default_channel = ""
+        self._default_target = ""
+        self._default_service_url = ""
+
+    def set_default_channel_target(self, channel: str, target: str, service_url: str = "") -> None:
+        with self._default_target_lock:
+            self._default_channel = str(channel or "")
+            self._default_target = str(target or "")
+            self._default_service_url = str(service_url or "")
+
+    def clear_default_channel_target(self) -> None:
+        with self._default_target_lock:
+            self._default_channel = ""
+            self._default_target = ""
+            self._default_service_url = ""
 
     def handle_request(
         self,
@@ -645,22 +652,18 @@ class MCPProtocolHandler:
 
     def _call_tool(self, name: str, args: dict[str, Any]) -> Any:
         # Infrastructure tools
-        if name == "jobs_schedule":
-            return self._tool_jobs_schedule(args)
-        if name == "jobs_list":
-            return self._tool_jobs_list(args)
-        if name == "jobs_cancel":
-            return self._tool_jobs_cancel(args)
-        if name == "jobs_runs":
-            return self._tool_jobs_runs(args)
-        if name == "jobs_clear_all":
-            return self._tool_jobs_clear_all(args)
+        if name == "scheduled_tasks_schedule":
+            return self._tool_scheduled_tasks_schedule(args)
+        if name == "scheduled_tasks_list":
+            return self._tool_scheduled_tasks_list(args)
+        if name == "scheduled_tasks_cancel":
+            return self._tool_scheduled_tasks_cancel(args)
+        if name == "scheduled_tasks_runs":
+            return self._tool_scheduled_tasks_runs(args)
+        if name == "scheduled_tasks_clear_all":
+            return self._tool_scheduled_tasks_clear_all(args)
         if name == "send_message":
             return self._tool_send_message(args)
-        if name == "files_read":
-            return self._tool_files_read(args)
-        if name == "files_write":
-            return self._tool_files_write(args)
         if name == "audit_read":
             return self._tool_audit_read(args)
         # MCP server management tools
@@ -703,13 +706,15 @@ class MCPProtocolHandler:
             return self._tool_task_get_context(args)
         if name == "task_read_peer":
             return self._tool_task_read_peer(args)
+        if name == "task_process_info":
+            return self._tool_task_process_info(args)
         if name == "task_send_input":
             return self._tool_task_send_input(args)
         raise ValueError(f"Unknown tool: {name}")
 
     # ── Infrastructure tool implementations ───────────────
 
-    def _tool_jobs_schedule(self, args: dict[str, Any]) -> dict:
+    def _tool_scheduled_tasks_schedule(self, args: dict[str, Any]) -> dict:
         run_at_str = args["run_at"]
         try:
             run_at = datetime.fromisoformat(run_at_str.replace("Z", "+00:00"))
@@ -726,8 +731,9 @@ class MCPProtocolHandler:
             raise ValueError("; ".join(errors))
         job = self.scheduler.schedule(args["name"], run_at, payload, cron_expr=cron_expr)
         if self.data_dir:
-            log_event(self.data_dir, "mcp.jobs.schedule", {"job_id": job.job_id, "name": job.name})
+            log_event(self.data_dir, "mcp.scheduled_tasks.schedule", {"scheduled_task_id": job.job_id, "name": job.name})
         return {
+            "scheduled_task_id": job.job_id,
             "job_id": job.job_id,
             "name": job.name,
             "run_at": job.run_at.isoformat(),
@@ -735,26 +741,37 @@ class MCPProtocolHandler:
             "cron_expr": job.cron_expr,
         }
 
-    def _tool_jobs_list(self, args: dict[str, Any]) -> dict:
+    def _tool_scheduled_tasks_list(self, args: dict[str, Any]) -> dict:
         jobs = self.scheduler.list()
-        return {"jobs": [{"job_id": j.job_id, "name": j.name, "run_at": j.run_at.isoformat(),
-                          "completed": j.completed_at is not None, "cancelled": j.cancelled,
-                          "cron_expr": j.cron_expr} for j in jobs]}
+        entries = [{
+            "scheduled_task_id": j.job_id,
+            "job_id": j.job_id,
+            "name": j.name,
+            "run_at": j.run_at.isoformat(),
+            "completed": j.completed_at is not None,
+            "cancelled": j.cancelled,
+            "cron_expr": j.cron_expr,
+        } for j in jobs]
+        return {"scheduled_tasks": entries, "jobs": entries}
 
-    def _tool_jobs_cancel(self, args: dict[str, Any]) -> dict:
-        if self.scheduler.cancel(args["job_id"]):
+    def _tool_scheduled_tasks_cancel(self, args: dict[str, Any]) -> dict:
+        scheduled_task_id = args.get("scheduled_task_id") or args.get("job_id")
+        if not scheduled_task_id:
+            raise ValueError("scheduled_task_id is required")
+        if self.scheduler.cancel(scheduled_task_id):
             if self.data_dir:
-                log_event(self.data_dir, "mcp.jobs.cancel", {"job_id": args["job_id"]})
-            return {"status": "cancelled", "job_id": args["job_id"]}
-        raise ValueError(f"Job not found: {args['job_id']}")
+                log_event(self.data_dir, "mcp.scheduled_tasks.cancel", {"scheduled_task_id": scheduled_task_id})
+            return {"status": "cancelled", "scheduled_task_id": scheduled_task_id, "job_id": scheduled_task_id}
+        raise ValueError(f"Scheduled task not found: {scheduled_task_id}")
 
-    def _tool_jobs_runs(self, args: dict[str, Any]) -> dict:
-        return {"runs": self.scheduler.list_runs(job_id=args.get("job_id"), limit=args.get("limit", 50))}
+    def _tool_scheduled_tasks_runs(self, args: dict[str, Any]) -> dict:
+        scheduled_task_id = args.get("scheduled_task_id") or args.get("job_id")
+        return {"runs": self.scheduler.list_runs(job_id=scheduled_task_id, limit=args.get("limit", 50))}
 
-    def _tool_jobs_clear_all(self, args: dict[str, Any]) -> dict:
+    def _tool_scheduled_tasks_clear_all(self, args: dict[str, Any]) -> dict:
         count = self.scheduler.clear_all()
         if self.data_dir:
-            log_event(self.data_dir, "mcp.jobs.clear_all", {"cleared": count})
+            log_event(self.data_dir, "mcp.scheduled_tasks.clear_all", {"cleared": count})
         return {"status": "cleared", "cleared": count}
 
     def _audit(self, action: str, payload: dict[str, Any]) -> None:
@@ -870,42 +887,6 @@ class MCPProtocolHandler:
             self._audit("send_message", audit_payload)
             return {"status": "sent", "channel": "slack"}
         raise ValueError(f"Unsupported channel: {channel}")
-
-    def _tool_files_read(self, args: dict[str, Any]) -> dict:
-        if not self.data_dir:
-            raise ValueError("data_dir not configured")
-        base = os.path.abspath(self.data_dir)
-        path = args["path"]
-        if not os.path.isabs(path):
-            path = os.path.join(base, path)
-        target = os.path.abspath(path)
-        if not target.startswith(base):
-            raise PermissionError("Path is outside allowed data_dir")
-        if not os.path.exists(target):
-            raise FileNotFoundError(f"File not found: {path}")
-        with open(target, "r", encoding="utf-8") as f:
-            return {"content": f.read()}
-
-    def _tool_files_write(self, args: dict[str, Any]) -> dict:
-        """Write content to a file. Relative paths resolve against data_dir."""
-        if not self.data_dir:
-            raise ValueError("data_dir not configured")
-        base = os.path.abspath(self.data_dir)
-        path = args["path"]
-        if not os.path.isabs(path):
-            path = os.path.join(base, path)
-        target = os.path.abspath(path)
-        # Warn (but allow) writes outside data_dir to preserve backward compatibility.
-        if not target.startswith(base):
-            logger.warning("files_write: path outside data_dir: %s", target)
-        # Create parent directories
-        parent = os.path.dirname(target)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        with open(target, "w", encoding="utf-8") as f:
-            f.write(args["content"])
-        self._audit("files.write", {"path": target, "size": len(args["content"])})
-        return {"status": "written", "path": target, "size": len(args["content"])}
 
     def _tool_audit_read(self, args: dict[str, Any]) -> dict:
         if not self.data_dir:
@@ -1043,10 +1024,21 @@ class MCPProtocolHandler:
         """Resolve channel and target, falling back to owner Telegram chat."""
         channel = args.get("channel", "")
         target = args.get("target", "")
+        if not channel and not target:
+            with self._default_target_lock:
+                if self._default_channel and self._default_target:
+                    channel = self._default_channel
+                    target = self._default_target
         if not channel and not target and self.owner_chat_id:
             channel = "telegram"
             target = self.owner_chat_id
         return channel, target
+
+    def _resolve_task_type(self, args: dict[str, Any]) -> str:
+        task_type = str(args.get("task_type", "standard")).strip().lower()
+        if task_type == "continuous":
+            return "continuous_improvement"
+        return task_type or "standard"
 
     def _tool_tasks_propose(self, args: dict[str, Any]) -> dict:
         """Create a proposal that the user must approve before workers are spawned."""
@@ -1054,6 +1046,8 @@ class MCPProtocolHandler:
 
         channel, target = self._resolve_channel_target(args)
         name = args.get("name") or generate_name()
+        task_prompt = args["prompt"]
+        on_complete_hook = (args.get("on_complete") or "").strip()
 
         # Guard: reject duplicate task names that are still active/proposed
         existing = tm.list_tasks()
@@ -1067,10 +1061,8 @@ class MCPProtocolHandler:
 
         task = tm.create_task(
             name=name,
-            prompt=args["prompt"],
-            plan=args.get("plan", ""),
-            supervisor_instructions=args.get("supervisor_instructions", ""),
-            task_type=args.get("task_type", "standard"),
+            prompt=task_prompt,
+            task_type=self._resolve_task_type(args),
             ci_config=args.get("continuous"),
             channel=channel,
             target=target,
@@ -1080,9 +1072,8 @@ class MCPProtocolHandler:
             status="proposed",
         )
 
-        # Set on_complete hook if provided
-        if args.get("on_complete"):
-            task.on_complete = args["on_complete"]
+        if on_complete_hook:
+            task.on_complete = on_complete_hook
             tm._save()
 
         if self.data_dir:
@@ -1090,24 +1081,30 @@ class MCPProtocolHandler:
                 "task_id": task.task_id,
                 "name": task.name,
                 "prompt": task.prompt,
-                "plan": getattr(task, "plan", None),
                 "auto_supervise": task.auto_supervise,
-                "supervisor_instructions": getattr(task, "supervisor_instructions", None),
                 "channel": getattr(task, "channel", ""),
                 "target": getattr(task, "target", ""),
                 "task_type": getattr(task, "task_type", "standard"),
             })
 
-        # NOTE: We do NOT send a notification here.  The orchestrator's own
-        # chat response (returned via handle_chat → Telegram) already tells
-        # the user about the proposal.  Sending a second notification would
-        # cause the user to see two "proposed task" messages.
+        if task.channel and task.target:
+            interval = int(task.check_interval or 0)
+            interval_label = f"{interval}s" if interval < 60 else f"{max(1, interval // 60)}m"
+            proposal_msg = (
+                "📋 Task proposal ready\n"
+                f"🧩 Name: {task.name}\n"
+                f"🆔 ID: {task.task_id}\n"
+                f"📝 Expanded request:\n{self._clip_text(task.prompt, 1200)}\n\n"
+                f"👀 Supervisor: {'✅ Enabled' if task.auto_supervise else '❌ Disabled'} ({interval_label})\n"
+                "✅ Reply Yes to approve\n"
+                "❌ Reply No to reject"
+            )
+            self._send_notification(task.channel, task.target, proposal_msg, task.service_url)
 
         return {
             "task_id": task.task_id,
             "name": task.name,
             "status": "proposed",
-            "plan": task.plan,
             "auto_supervise": task.auto_supervise,
             "task_type": task.task_type,
             "message": "Proposal sent to user. Waiting for approval.",
@@ -1143,10 +1140,13 @@ class MCPProtocolHandler:
 
         channel, target = self._resolve_channel_target(args)
         name = args.get("name") or generate_name()
+        task_prompt = args["prompt"]
+        on_complete_hook = (args.get("on_complete") or "").strip()
+
         task = tm.create_task(
             name=name,
-            prompt=args["prompt"],
-            task_type=args.get("task_type", "standard"),
+            prompt=task_prompt,
+            task_type=self._resolve_task_type(args),
             ci_config=args.get("continuous"),
             channel=channel,
             target=target,
@@ -1155,9 +1155,8 @@ class MCPProtocolHandler:
             auto_supervise=args.get("auto_supervise", True),
         )
 
-        # Set on_complete hook if provided
-        if args.get("on_complete"):
-            task.on_complete = args["on_complete"]
+        if on_complete_hook:
+            task.on_complete = on_complete_hook
             tm._save()
 
         if self.data_dir:
@@ -1195,6 +1194,22 @@ class MCPProtocolHandler:
                     if w.session_id:
                         logger.info("Stored worker session %s on task %s for future resume", w.session_id, task_id)
 
+            if self._consume_worker_relaunch_requested(task_id):
+                if t and t.status not in ("completed", "failed", "cancelled"):
+                    tm.handle_report(
+                        task_id,
+                        "progress",
+                        "Worker session relaunched with updated instructions",
+                        detail="Previous worker session was intentionally stopped to apply new guidance.",
+                        from_tier="orchestrator",
+                    )
+                    t.worker_exited_at = _now()
+                    t.worker_process_observed_at = _now()
+                    t.worker_child_pids = []
+                    t.worker_process_running = False
+                    tm._save()
+                return
+
             if t and t.status not in ("completed", "failed", "cancelled"):
                 if output.startswith("ERROR:") or output.startswith("UNEXPECTED ERROR:"):
                     self._request_retry_approval(task_id, output[:500])
@@ -1206,32 +1221,6 @@ class MCPProtocolHandler:
                     t.worker_child_pids = []
                     t.worker_process_running = False
                     tm._save()
-
-                    # If supervisor is still running but worker exited, check for
-                    # unread inbox messages and re-dispatch if supervisor sent feedback
-                    if t.auto_supervise and pool:
-                        sup = pool.get_supervisor(task_id)
-                        unread = [m for m in t.inbox if not m.acknowledged]
-                        if sup and sup.is_running and unread:
-                            logger.info(
-                                "Worker %s exited but supervisor is active with %d unread messages — re-dispatching",
-                                task_id, len(unread),
-                            )
-                            try:
-                                pool.start_worker(
-                                    task_id=task_id,
-                                    prompt=(
-                                        f"CONTINUATION: You previously worked on this task and exited. "
-                                        f"The supervisor has sent you feedback. Check your inbox with "
-                                        f"task_check_inbox and address any issues. Original task: {t.prompt[:2000]}"
-                                    ),
-                                    working_dir=t.working_dir,
-                                    on_output=on_worker_output,
-                                    on_complete=on_worker_complete,
-                                )
-                                tm.append_log(task_id, "\n--- WORKER RE-DISPATCHED (supervisor feedback pending) ---\n")
-                            except RuntimeError:
-                                logger.warning("Could not re-dispatch worker %s (already running?)", task_id)
 
                     # WATCHDOG: If worker exited and completion was deferred,
                     # schedule a timeout to auto-finalize if supervisor doesn't act
@@ -1295,6 +1284,75 @@ class MCPProtocolHandler:
 
         return on_worker_output, on_worker_complete
 
+    def _mark_worker_relaunch_requested(self, task_id: str) -> None:
+        with self._worker_relaunch_lock:
+            self._worker_relaunch_requested.add(task_id)
+
+    def _consume_worker_relaunch_requested(self, task_id: str) -> bool:
+        with self._worker_relaunch_lock:
+            if task_id not in self._worker_relaunch_requested:
+                return False
+            self._worker_relaunch_requested.remove(task_id)
+            return True
+
+    def _relaunch_worker_with_message(
+        self,
+        task: Any,
+        *,
+        msg_type: str,
+        content: str,
+        from_tier: str,
+    ) -> bool:
+        pool = self._require_worker_pool()
+        tm = self._require_task_manager()
+        worker = pool.get_worker(task.task_id)
+        resume_session_id = task.worker_session_id
+        worker_running = bool(worker and worker.is_running)
+
+        if worker and worker.session_id:
+            resume_session_id = worker.session_id
+            task.worker_session_id = worker.session_id
+            task.updated_at = _now()
+            tm._save()
+
+        if worker_running:
+            self._mark_worker_relaunch_requested(task.task_id)
+            pool.stop_worker(task.task_id)
+
+        on_worker_output, on_worker_complete = self._build_worker_callbacks(tm, pool)
+        relaunch_prompt = (
+            f"CONTINUATION for task '{task.name}'.\n\n"
+            f"Original task: {task.prompt[:3000]}\n\n"
+            f"Latest message from {from_tier} ({msg_type}):\n{content}\n\n"
+            "Apply this update immediately. Continue from existing workspace state, "
+            "then report progress with task_report."
+        )
+        try:
+            pool.start_worker(
+                task_id=task.task_id,
+                prompt=relaunch_prompt,
+                working_dir=task.working_dir,
+                on_output=on_worker_output,
+                on_complete=on_worker_complete,
+                resume_session_id=resume_session_id,
+            )
+        except RuntimeError as exc:
+            logger.warning("Could not relaunch worker %s after %s: %s", task.task_id, msg_type, exc)
+            return False
+        tm.update_status(task.task_id, "running")
+        tm.append_log(
+            task.task_id,
+            f"\n--- WORKER RELAUNCHED ({from_tier} {msg_type}) ---\n{content[:1000]}\n",
+        )
+        logger.info(
+            "Relaunched worker for task %s using resume session %s after %s %s",
+            task.task_id,
+            resume_session_id or "<none>",
+            from_tier,
+            msg_type,
+        )
+        return True
+
     def _sync_worker_process_state(self, tm: TaskManager, task_id: str) -> dict[str, Any]:
         task = tm.get(task_id)
         if not task or not self.worker_pool:
@@ -1337,6 +1395,124 @@ class MCPProtocolHandler:
             "active_pids": active_pids,
         }
 
+    def _collect_process_metrics(self, pids: list[int]) -> list[dict[str, Any]]:
+        unique_pids = sorted({int(pid) for pid in pids if isinstance(pid, int) and pid > 0})
+        if not unique_pids:
+            return []
+        if sys.platform == "win32":
+            return self._collect_process_metrics_windows(unique_pids)
+        return self._collect_process_metrics_unix(unique_pids)
+
+    def _collect_process_metrics_windows(self, pids: list[int]) -> list[dict[str, Any]]:
+        pid_expr = ",".join(str(pid) for pid in pids)
+        command = (
+            "$pidList = @(" + pid_expr + ")\n"
+            "$procs = Get-CimInstance Win32_Process | Where-Object { $pidList -contains [int]$_.ProcessId }\n"
+            "$cpuRows = Get-CimInstance Win32_PerfFormattedData_PerfProc_Process | "
+            "Where-Object { $pidList -contains [int]$_.IDProcess }\n"
+            "$cpuByPid = @{}\n"
+            "foreach ($row in $cpuRows) { $cpuByPid[[int]$row.IDProcess] = [double]$row.PercentProcessorTime }\n"
+            "$out = @()\n"
+            "foreach ($proc in $procs) {\n"
+            "  $pid = [int]$proc.ProcessId\n"
+            "  $out += [pscustomobject]@{\n"
+            "    pid = $pid\n"
+            "    parent_pid = [int]$proc.ParentProcessId\n"
+            "    name = [string]$proc.Name\n"
+            "    command_line = if ($null -ne $proc.CommandLine) { [string]$proc.CommandLine } else { \"\" }\n"
+            "    cpu_percent = if ($cpuByPid.ContainsKey($pid)) { [double]$cpuByPid[$pid] } else { $null }\n"
+            "    memory_rss_bytes = if ($null -ne $proc.WorkingSetSize) { [int64]$proc.WorkingSetSize } else { $null }\n"
+            "    memory_private_bytes = if ($null -ne $proc.PrivatePageCount) { [int64]$proc.PrivatePageCount } else { $null }\n"
+            "  }\n"
+            "}\n"
+            "$out | ConvertTo-Json -Depth 4 -Compress\n"
+        )
+        try:
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", command],
+                capture_output=True,
+                text=True,
+                timeout=6,
+                check=False,
+            )
+            if proc.returncode != 0:
+                return []
+            raw = (proc.stdout or "").strip()
+            if not raw:
+                return []
+            parsed = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            return []
+        rows = parsed if isinstance(parsed, list) else [parsed]
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            pid = row.get("pid")
+            if not isinstance(pid, int):
+                continue
+            parent_pid = row.get("parent_pid")
+            cpu_percent = row.get("cpu_percent")
+            memory_rss = row.get("memory_rss_bytes")
+            memory_private = row.get("memory_private_bytes")
+            results.append({
+                "pid": pid,
+                "parent_pid": parent_pid if isinstance(parent_pid, int) else None,
+                "name": str(row.get("name") or ""),
+                "command_line": str(row.get("command_line") or ""),
+                "cpu_percent": float(cpu_percent) if isinstance(cpu_percent, (int, float)) else None,
+                "memory_rss_bytes": int(memory_rss) if isinstance(memory_rss, (int, float)) else None,
+                "memory_private_bytes": int(memory_private) if isinstance(memory_private, (int, float)) else None,
+            })
+        return results
+
+    def _collect_process_metrics_unix(self, pids: list[int]) -> list[dict[str, Any]]:
+        pid_expr = ",".join(str(pid) for pid in pids)
+        try:
+            proc = subprocess.run(
+                ["ps", "-o", "pid=,ppid=,%cpu=,rss=,comm=,args=", "-p", pid_expr],
+                capture_output=True,
+                text=True,
+                timeout=6,
+                check=False,
+            )
+            if proc.returncode != 0:
+                return []
+        except Exception:  # noqa: BLE001
+            return []
+        results: list[dict[str, Any]] = []
+        for line in (proc.stdout or "").splitlines():
+            parts = line.strip().split(None, 5)
+            if len(parts) < 5:
+                continue
+            try:
+                pid = int(parts[0])
+                parent_pid = int(parts[1])
+            except ValueError:
+                continue
+            cpu_percent: float | None = None
+            memory_rss_bytes: int | None = None
+            try:
+                cpu_percent = float(parts[2])
+            except ValueError:
+                cpu_percent = None
+            try:
+                memory_rss_bytes = int(parts[3]) * 1024
+            except ValueError:
+                memory_rss_bytes = None
+            name = parts[4]
+            command_line = parts[5] if len(parts) >= 6 else name
+            results.append({
+                "pid": pid,
+                "parent_pid": parent_pid,
+                "name": name,
+                "command_line": command_line,
+                "cpu_percent": cpu_percent,
+                "memory_rss_bytes": memory_rss_bytes,
+                "memory_private_bytes": None,
+            })
+        return results
+
     def _start_task(self, task: Any) -> dict:
         """Start a task's worker (and supervisor). Used by both approve and create."""
         tm = self._require_task_manager()
@@ -1356,6 +1532,7 @@ class MCPProtocolHandler:
             working_dir=task.working_dir,
             on_output=on_worker_output,
             on_complete=on_worker_complete,
+            resume_session_id=task.worker_session_id,
         )
         self._sync_worker_process_state(tm, task.task_id)
 
@@ -1376,7 +1553,6 @@ class MCPProtocolHandler:
                 worker_session_id=None,
                 check_interval=task.check_interval,
                 on_output=on_supervisor_output,
-                supervisor_instructions=getattr(task, "supervisor_instructions", ""),
                 working_dir=task.working_dir,
                 task_manager=tm,
             )
@@ -1493,7 +1669,6 @@ class MCPProtocolHandler:
             "supervisor_session_id": task.supervisor_session_id,
             "timeline": task.concise_timeline(limit),
             "pending_inbox": len([m for m in task.inbox if not m.acknowledged]),
-            "worker_pid": process_state.get("pid"),
             "worker_child_processes": len(process_state.get("child_pids", [])),
             "worker_process_running": bool(process_state.get("running")),
         }
@@ -1570,13 +1745,6 @@ class MCPProtocolHandler:
         if task.status in terminal_states and msg_type in ("instruction", "redirect"):
             pool = self._require_worker_pool()
 
-            # Update supervisor_instructions if provided
-            new_sup_instructions = args.get("supervisor_instructions")
-            if new_sup_instructions:
-                task.supervisor_instructions = new_sup_instructions
-                task.updated_at = _now()
-                tm._save()
-
             # Build continuation prompt referencing original task + new instructions
             continuation_prompt = (
                 f"CONTINUATION of previous task '{task.name}'.\n\n"
@@ -1631,7 +1799,25 @@ class MCPProtocolHandler:
             if task:
                 self._cancel_supervisor_job(task)
 
-        return {"status": "sent", "msg_id": msg.msg_id, "msg_type": msg.msg_type}
+        worker_relaunched = False
+        if (
+            msg_type in {"instruction", "input", "redirect"}
+            and task.status in {"running", "paused", "needs_input", "pending"}
+            and self.worker_pool
+        ):
+            worker_relaunched = self._relaunch_worker_with_message(
+                task,
+                msg_type=msg_type,
+                content=content,
+                from_tier="orchestrator",
+            )
+
+        return {
+            "status": "sent",
+            "msg_id": msg.msg_id,
+            "msg_type": msg.msg_type,
+            "worker_relaunched": worker_relaunched,
+        }
 
     def _tool_tasks_clear_all(self, args: dict[str, Any]) -> dict:
         tm = self._require_task_manager()
@@ -1700,20 +1886,28 @@ class MCPProtocolHandler:
                 can_complete = task.completion_deferred or not worker_running
 
                 # STUCK-ASSESSMENT DETECTION: If the worker is dead and the
-                # supervisor has assessed 2+ times without finalizing, force
-                # completion (unless there are strong negative signals).
+                # supervisor has assessed 10+ times without finalizing, force
+                # finalization so tasks cannot remain limbo.
                 force_complete = False
+                force_fail = False
                 if (report_type == "assessment"
                         and can_complete
                         and not worker_running
-                        and task.supervisor_assessment_count >= 2
-                        and not strong_negative):
-                    logger.warning(
-                        "STUCK-ASSESSMENT: Supervisor assessed task %s %d times without "
-                        "finalizing (worker dead). Auto-completing.",
-                        task_id, task.supervisor_assessment_count,
-                    )
-                    force_complete = True
+                        and task.supervisor_assessment_count >= _SUPERVISOR_AUTO_FINALIZE_ASSESSMENT_THRESHOLD):
+                    if strong_negative:
+                        logger.warning(
+                            "STUCK-ASSESSMENT: Supervisor assessed task %s %d times without "
+                            "finalizing (worker dead). Auto-failing.",
+                            task_id, task.supervisor_assessment_count,
+                        )
+                        force_fail = True
+                    else:
+                        logger.warning(
+                            "STUCK-ASSESSMENT: Supervisor assessed task %s %d times without "
+                            "finalizing (worker dead). Auto-completing.",
+                            task_id, task.supervisor_assessment_count,
+                        )
+                        force_complete = True
 
                 if can_complete and (report_type == "completed" or force_complete or (report_type == "assessment" and positive and not strong_negative)):
                     report_type = "completed"
@@ -1731,6 +1925,16 @@ class MCPProtocolHandler:
 
                     if self.worker_pool:
                         self.worker_pool.request_supervisor_check(task_id)
+                elif can_complete and force_fail:
+                    report_type = "failed"
+                    args["summary"] = f"Auto-finalized as failed after {task.supervisor_assessment_count} assessments: {summary_text}".strip()
+                    task.completion_deferred = False
+                    task.completion_deferred_at = None
+                    task.completion_deferred_summary = ""
+                    task.completion_deferred_detail = ""
+                    task.supervisor_assessment_count = 0  # reset counter
+                    task.updated_at = _now()
+                    tm._save()
 
         # If a WORKER reports "completed" and there's an active supervisor,
         # defer completion — let the supervisor verify the outcome first
@@ -1990,6 +2194,63 @@ class MCPProtocolHandler:
         timeline = task.concise_timeline(10)
         return {"task_id": task_id, "logs": "\n".join(sections), "timeline": timeline}
 
+    def _tool_task_process_info(self, args: dict[str, Any]) -> dict:
+        role = getattr(self, "_current_role", "orchestrator")
+        if role != "supervisor":
+            raise ValueError("task_process_info is only available to supervisor sessions.")
+
+        tm = self._require_task_manager()
+        task_id = args["task_id"]
+        task = tm.get(task_id)
+        if not task:
+            raise ValueError(f"Task not found: {task_id}")
+
+        process_state = self._sync_worker_process_state(tm, task_id)
+        root_pid = process_state.get("pid")
+        child_pids = [int(p) for p in process_state.get("child_pids", []) if isinstance(p, int) and p > 0]
+        ordered_pids: list[int] = []
+        if isinstance(root_pid, int) and root_pid > 0:
+            ordered_pids.append(root_pid)
+        ordered_pids.extend(pid for pid in sorted(set(child_pids)) if pid not in ordered_pids)
+
+        metrics = self._collect_process_metrics(ordered_pids)
+        metrics_by_pid = {row["pid"]: row for row in metrics if isinstance(row.get("pid"), int)}
+
+        processes: list[dict[str, Any]] = []
+        for pid in ordered_pids:
+            row = metrics_by_pid.get(pid, {})
+            processes.append({
+                "pid": pid,
+                "is_root": bool(isinstance(root_pid, int) and pid == root_pid),
+                "is_running": bool(row),
+                "parent_pid": row.get("parent_pid"),
+                "name": row.get("name"),
+                "command_line": row.get("command_line"),
+                "cpu_percent": row.get("cpu_percent"),
+                "memory_rss_bytes": row.get("memory_rss_bytes"),
+                "memory_private_bytes": row.get("memory_private_bytes"),
+            })
+
+        running_processes = [proc for proc in processes if proc.get("is_running")]
+        total_cpu = sum(float(proc.get("cpu_percent") or 0.0) for proc in running_processes)
+        total_rss = sum(int(proc.get("memory_rss_bytes") or 0) for proc in running_processes)
+        total_private = sum(int(proc.get("memory_private_bytes") or 0) for proc in running_processes)
+
+        return {
+            "task_id": task_id,
+            "worker_process_running": bool(process_state.get("running")),
+            "root_pid": root_pid if isinstance(root_pid, int) else None,
+            "processes": processes,
+            "summary": {
+                "observed_processes": len(processes),
+                "running_processes": len(running_processes),
+                "child_processes": len(child_pids),
+                "total_cpu_percent": round(total_cpu, 2),
+                "total_memory_rss_bytes": total_rss,
+                "total_memory_private_bytes": total_private,
+            },
+        }
+
     def _tool_task_send_input(self, args: dict[str, Any]) -> dict:
         tm = self._require_task_manager()
         msg = tm.send_message(
@@ -2001,31 +2262,15 @@ class MCPProtocolHandler:
         if not msg:
             raise ValueError(f"Task not found: {args['task_id']}")
         task = tm.get(args["task_id"])
-        if task and self.worker_pool:
-            worker = self.worker_pool.get_worker(task.task_id)
-            worker_running = worker.is_running if worker else False
-            should_resume = task.completion_deferred or task.status in ("running", "paused", "needs_input")
-            if should_resume and not worker_running and task.auto_supervise:
-                on_worker_output, on_worker_complete = self._build_worker_callbacks(tm, self.worker_pool)
-                try:
-                    self.worker_pool.start_worker(
-                        task_id=task.task_id,
-                        prompt=(
-                            "CONTINUATION: You previously worked on this task and exited. "
-                            "The supervisor has sent you feedback. Check your inbox with "
-                            f"task_check_inbox and address any issues. Original task: {task.prompt[:2000]}"
-                        ),
-                        working_dir=task.working_dir,
-                        on_output=on_worker_output,
-                        on_complete=on_worker_complete,
-                    )
-                    tm.append_log(task.task_id, "\n--- WORKER RE-DISPATCHED (supervisor feedback pending) ---\n")
-                except RuntimeError:
-                    logger.warning(
-                        "Could not re-dispatch worker %s after supervisor input (already running?)",
-                        task.task_id,
-                    )
-        return {"status": "sent", "msg_id": msg.msg_id}
+        worker_relaunched = False
+        if task and task.status in {"running", "paused", "needs_input", "pending"} and self.worker_pool:
+            worker_relaunched = self._relaunch_worker_with_message(
+                task,
+                msg_type="instruction",
+                content=args["content"],
+                from_tier="supervisor",
+            )
+        return {"status": "sent", "msg_id": msg.msg_id, "worker_relaunched": worker_relaunched}
 
     @staticmethod
     def _clip_text(value: str, limit: int) -> str:
@@ -2071,7 +2316,7 @@ class MCPProtocolHandler:
         )
         return direction, rationale
 
-    def _maybe_chain_continuous_task(
+    def _maybe_chain_continuous_improvement(
         self,
         task: Any,
         reason: str,
@@ -2283,7 +2528,7 @@ class MCPProtocolHandler:
         chain_info: dict[str, Any] | None = None
         if getattr(task, "task_type", "standard") == "continuous_improvement":
             try:
-                chain_info = self._maybe_chain_continuous_task(task, reason, summary, detail)
+                chain_info = self._maybe_chain_continuous_improvement(task, reason, summary, detail)
             except Exception as exc:  # noqa: BLE001
                 logger.error("Continuous chain generation failed for task %s: %s", task.task_id, exc)
 
@@ -2410,6 +2655,11 @@ class MCPProtocolHandler:
         if not channel or not target:
             logger.debug("Skipping notification: no channel/target")
             return
+        if self.notify_callback:
+            try:
+                self.notify_callback(channel, target, text, service_url)
+            except Exception:  # noqa: BLE001
+                logger.debug("notify_callback failed", exc_info=True)
         try:
             if channel == "telegram" and self.telegram_token:
                 TelegramAdapter(self.telegram_token).send_message(chat_id=int(target), text=text)
@@ -2501,6 +2751,11 @@ class MCPProtocolHandler:
                         sl.send_message(channel=task.target, text=text)
         except Exception as exc:  # noqa: BLE001
             logger.error("Failed to notify user about task %s: %s", task_id, exc)
+        if self.notify_callback:
+            try:
+                self.notify_callback(task.channel, task.target, text, task.service_url)
+            except Exception:  # noqa: BLE001
+                logger.debug("notify_callback failed for task event", exc_info=True)
 
     def _log_task_event(
         self,

@@ -184,7 +184,6 @@ class Task:
 
     # Plan (for proposed tasks awaiting approval)
     plan: str = ""                      # what the worker will do
-    supervisor_instructions: str = ""   # what the supervisor should watch for
     approval_token: str = ""            # required proof for proposed-task approval
 
     # Supervision
@@ -250,7 +249,6 @@ class Task:
             "target": self.target,
             "service_url": self.service_url,
             "plan": self.plan,
-            "supervisor_instructions": self.supervisor_instructions,
             "approval_token": self.approval_token,
             "check_interval": self.check_interval,
             "auto_supervise": self.auto_supervise,
@@ -302,7 +300,6 @@ class Task:
             target=d.get("target", ""),
             service_url=d.get("service_url", ""),
             plan=d.get("plan", ""),
-            supervisor_instructions=d.get("supervisor_instructions", ""),
             approval_token=d.get("approval_token", ""),
             check_interval=d.get("check_interval", 600),
             auto_supervise=d.get("auto_supervise", True),
@@ -866,7 +863,6 @@ class TaskManager:
         check_interval: int = 600,
         auto_supervise: bool = True,
         plan: str = "",
-        supervisor_instructions: str = "",
         status: str = "pending",
         task_type: str = "standard",
         ci_config: Optional[dict[str, Any]] = None,
@@ -899,7 +895,6 @@ class TaskManager:
             check_interval=check_interval,
             auto_supervise=auto_supervise,
             plan=plan,
-            supervisor_instructions=supervisor_instructions,
             approval_token=uuid.uuid4().hex if status == "proposed" else "",
             ci_config=normalized_ci_config,
             ci_state=ci_state,

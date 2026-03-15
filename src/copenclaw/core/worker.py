@@ -36,7 +36,12 @@ from copenclaw.core.logging_config import (
     get_activity_log_path,
     get_worker_log_dir,
 )
-from copenclaw.core.templates import worker_template, supervisor_template
+from copenclaw.core.templates import (
+    worker_session_start_prompt,
+    worker_resume_session_prompt,
+    worker_template,
+    supervisor_template,
+)
 from copenclaw.integrations.copilot_cli import (
     CopilotCli,
     CopilotCliError,
@@ -44,6 +49,8 @@ from copenclaw.integrations.copilot_cli import (
 )
 
 logger = logging.getLogger("copenclaw.worker")
+_UNKNOWN_OPTION_STARTUP_WINDOW_SECONDS = 45.0
+_UNKNOWN_OPTION_BURST_LIMIT = 3
 
 
 def _collect_child_processes(root_pid: int) -> list[int]:
@@ -112,208 +119,11 @@ def _collect_child_processes(root_pid: int) -> list[int]:
     return descendants
 
 # ── System prompt templates ──────────────────────────────────
-# Templates are now loaded from copenclaw/templates/*.md via
-# copenclaw.core.templates.  The old inline strings have been
-# removed.  Keep these aliases for backward compatibility in tests.
+# Source-of-truth system prompts live in templates/system/*.md and are
+# loaded via copenclaw.core.templates.
 
-WORKER_INSTRUCTIONS_TEMPLATE_REMOVED = """\
-# Worker Task Instructions
-
-You are a **COpenClaw worker** executing a specific task autonomously.
-
-## Your Task
-
-**Task ID:** `{task_id}`
-
-**Instructions:**
-{prompt}
-
-## Workspace Root
-
-Your workspace root directory is: `{workspace_root}`
-
-All project files (including README.md) are at this location. You have
-been granted `--add-dir` access to this directory so you can use Copilot's
-built-in file read/write/edit tools on files there.
-
-## CRITICAL: First Steps (Do These Before Anything Else)
-
-**Step 1 — Read the workspace README:**
-
-Use the built-in file tools to read `{workspace_root}\\README.md`.
-
-This tells you what projects and tasks already exist. Study it.
-
-**Step 2 — List existing project folders:**
-
-Use the built-in file tools to list `{workspace_root}` and review existing project folders.
-
-**Step 3 — Decide: existing project or new project?**
-
-- If your task relates to an **existing project folder**, work inside that folder.
-- If your task is **new/unrelated**, create a new descriptively-named project folder.
-  Example: `gfpgan-browser-app`, `portfolio-website`, `data-pipeline`, etc.
-
-**Step 4 — Create your project folder (if new):**
-
-Create your project folder inside `{workspace_root}` (e.g., `{workspace_root}\\my-project-name`).
-
-Then `cd` into it and do ALL your work there.
-
-## ⚠️ AVOID interactive or blocking commands!
-
-**DO NOT** run commands that wait for user input or run forever:
-- ❌ `npm start`, `python -m http.server`, `flask run` — these listen forever
-- ❌ `npm init` (without `-y`), `git commit` (without `-m`) — these prompt for input
-- ❌ `pause`, `read`, `choice` — these wait for keyboard input
-
-Instead:
-- ✅ Use `-y` / `--yes` / `--non-interactive` flags (e.g. `npm init -y`)
-- ✅ Background long-running processes: `start /b npm start` (Windows) or `npm start &` (Linux)
-- ✅ Use `timeout 10 npm start` to auto-kill after N seconds if you just need to test startup
-- ✅ Prefer build/test commands that exit: `npm run build`, `npm test`, `pytest`
-
-Running a blocking command will hang your session and waste time.
-
-## ⚠️ NEVER create files directly in the workspace root!
-
-**DO NOT** put `package.json`, `index.html`, source files, `node_modules/`,
-or any project files directly in `{workspace_root}`. They MUST go inside
-a project subfolder. The workspace root is shared across all tasks —
-polluting it breaks other workers.
-
-✅ CORRECT: `{workspace_root}\\my-app\\package.json`
-❌ WRONG:   `{workspace_root}\\package.json`
-
-## How to Work
-
-1. **Use MCP tools** to do your work:
-   - `files_read` — read files from the data directory
-   - `files_write` — write files to the task workspace or data directory
-   - `task_report` — report progress upward (REQUIRED)
-   - `task_check_inbox` — check for messages from the orchestrator/supervisor
-   - `task_get_context` — re-read your task prompt and recent messages
-
-   **File access tip:** Copilot CLI also has built-in file read/write/edit
-   tools that work on directories granted via `--add-dir`. Prefer these
-   for file operations — they are faster and safer.
-
-2. **Report progress** using `task_report`:
-   - `type="progress"` at each major milestone
-   - `type="needs_input"` if you are truly blocked and need a human decision
-   - `type="completed"` when you are fully done (REQUIRED at the end)
-   - `type="failed"` if you hit an unrecoverable error
-   - `type="artifact"` when you produce a deliverable (URL, file, etc.)
-
-   ⚠️ **IMPORTANT: Report progress BEFORE long-running commands!**
-   Before running `npm install`, `pip install`, builds, tests, or any
-   command that may take more than a few seconds, FIRST call `task_report`
-   with `type="progress"` explaining what you're about to do. This ensures
-   the supervisor and user can see your intent even if the command hangs.
-
-3. **Check your inbox** periodically with `task_check_inbox` (before major decisions)
-   to see if the user or supervisor has sent you instructions or input.
-
-4. **Work autonomously.** Do NOT ask questions unless truly blocked.
-   Make reasonable decisions and keep moving forward.
-
-5. **Keep reports concise** — one-line summaries. Put details in the `detail` field.
-    **Include key outputs in `detail`** (command output, listings, logs, paths, URLs).
-
-6. **When COMPLETELY DONE**, first **update the workspace README.md**:
-   - Read the current README.md at `{workspace_root}\\README.md`
-   - Append a new entry under the `## Completed Tasks` table with:
-     - Today's date
-     - Your task name/ID
-     - A one-line summary of what you accomplished
-   - Write the updated file back
-   - If README.md doesn't exist, create it with a header and your entry
-
-7. Then call `task_report` with `type="completed"`.
-   This is how the system knows you are finished.
-
-8. **After reporting completion**, enter a **wait loop**:
-   - Call `task_check_inbox` every 30–60 seconds
-   - If supervisor sends feedback or corrections, address them
-   - Keep looping for up to 10 minutes (or until inbox says "confirmed_done")
-   - Only exit cleanly after the wait period with no new instructions
-   - This ensures the supervisor can verify your work and request fixes
-
-## Important
-
-- Your task_id for all MCP tool calls is: `{task_id}`
-- Always pass `task_id` when calling task_report, task_check_inbox, etc.
-- Create files, run builds, deploy — whatever the task requires
-- **All project files go in a project subfolder, NEVER in the workspace root**
-"""
-
-SUPERVISOR_INSTRUCTIONS_TEMPLATE = """\
-# Supervisor Instructions
-
-You are a **COpenClaw supervisor** — a QUALITY GATEKEEPER for a worker task.
-
-## Task Details
-
-**Task ID:** `{task_id}`
-**Worker Session:** `{worker_session_id}`
-
-**Original Task:**
-{prompt}
-
-**Supervisor Instructions:**
-{supervisor_instructions}
-
-## Workspace Root
-
-Your workspace root directory is: `{workspace_root}`
-
-The worker's workspace is linked into your directory as `workers-workspace/`.
-You can inspect the worker's files there directly. You also have
-`--add-dir` access to both the workspace root and the worker's workspace.
-
-**FIRST**, read the project README.md to understand the workspace context:
-
-Use the built-in file tools to read `{workspace_root}/README.md`.
-
-## Your Role
-
-You are NOT just a passive observer. You are the gatekeeper who decides
-whether the task is TRULY complete.
-
-## Monitoring Phase (worker still working)
-
-1. Use `task_read_peer` to read the worker's latest output/logs.
-2. Check `task_check_inbox` for instructions from the orchestrator/user.
-3. Inspect the worker's files via `workers-workspace/` in your directory.
-4. Assess:
-   - Making progress → report `type="assessment"` with concise summary
-   - Stuck or looping → use `task_send_input` to give guidance,
-     then report `type="intervention"`
-   - Failed irrecoverably → report `type="escalation"`
-
-## Verification Phase (worker says "done")
-
-When the worker reports completion, you MUST VERIFY the outcome:
-
-1. **CHECK OUTPUT:** Inspect `workers-workspace/` for deliverables,
-   or use the built-in file tools to verify (list/read files, etc.)
-2. **TEST FUNCTIONALITY:** Actually test that the result works
-3. **FOLLOW INSTRUCTIONS:** The supervisor instructions above tell you
-   what to verify
-4. **CHECK README.MD:** Verify the worker updated README.md with a summary
-   of the completed task. If not, send the worker a message to do it.
-5. **DECISION:**
-    - If SATISFIED → report `type="completed"` with a concise summary of what you verified
-   - If NOT SATISFIED → use `task_send_input` to tell the worker what's wrong
-
-## Rules
-
-- Be concise. One-line summaries, details in the detail field.
-- Always include concrete outputs/evidence in the detail field.
-- Focus on unblocking the worker, not doing the work yourself.
-- When in doubt, test it. A verified result is better than an assumed one.
-- Your task_id for all MCP tool calls is: `{task_id}`
-"""
+WORKER_INSTRUCTIONS_TEMPLATE_REMOVED = "Deprecated: use templates/system/worker.md"
+SUPERVISOR_INSTRUCTIONS_TEMPLATE = "Deprecated: use templates/system/supervisor.md"
 
 
 # ── Workspace linking helpers ────────────────────────────────
@@ -671,9 +481,9 @@ class WorkerThread:
             # Build the command — short trigger prompt since instructions are in the file
             cmd = cli.build_launch_command(require_subprocess=True)
             if self.resume_session_id:
-                cmd.extend(["-p", f"You are worker for task {self.task_id}. You are RESUMING a previous session — you have full context of your earlier work. Check your inbox with task_check_inbox for new instructions, then continue working."])
+                cmd.extend(["-p", worker_resume_session_prompt(task_id=self.task_id)])
             else:
-                cmd.extend(["-p", f"You are worker for task {self.task_id}. Read your instructions from the copilot-instructions.md file and begin working on the task immediately. Use MCP tools to report progress and the built-in file tools for filesystem work."])
+                cmd.extend(["-p", worker_session_start_prompt(task_id=self.task_id)])
 
             env = os.environ.copy()
             env.setdefault("TERM", "dumb")
@@ -737,6 +547,8 @@ class WorkerThread:
 
             # Stream stdout line-by-line
             assert self._process.stdout is not None
+            startup_deadline = time.monotonic() + _UNKNOWN_OPTION_STARTUP_WINDOW_SECONDS
+            unknown_option_hits = 0
             for line in self._process.stdout:
                 if self._stop_event.is_set():
                     self._log("Stop event received, breaking stream")
@@ -746,6 +558,16 @@ class WorkerThread:
                 if line:
                     self._accumulated_output.append(line)
                     self._log(line)
+                    if "unknown option '--no-warnings'" in line.lower():
+                        if time.monotonic() <= startup_deadline:
+                            unknown_option_hits += 1
+                        if unknown_option_hits >= _UNKNOWN_OPTION_BURST_LIMIT:
+                            self._log(
+                                "Detected repeated '--no-warnings' unknown-option failures during startup; terminating worker process."
+                            )
+                            if self._process and self._process.poll() is None:
+                                self._process.terminate()
+                            break
                     if self.on_output:
                         self.on_output(self.task_id, line)
 
@@ -814,7 +636,6 @@ class SupervisorThread:
         check_interval: int = 600,
         on_output: Optional[Callable[[str, str], None]] = None,
         timeout: int = 120,
-        supervisor_instructions: str = "",
         working_dir: Optional[str] = None,
         root_workspace_dir: Optional[str] = None,
         task_manager: Optional[Any] = None,
@@ -828,7 +649,6 @@ class SupervisorThread:
         self.check_interval = check_interval
         self.on_output = on_output
         self.timeout = timeout
-        self.supervisor_instructions = supervisor_instructions
         self.working_dir = working_dir   # The task directory (parent)
         self.root_workspace_dir = root_workspace_dir  # Main workspace (e.g. ~/.copenclaw)
         self._task_manager = task_manager  # For contextual trigger prompts
@@ -949,7 +769,7 @@ class SupervisorThread:
                 f"You have already assessed {task.supervisor_assessment_count} time(s) without finalizing. "
                 f"You MUST make a final decision NOW. Use task_read_peer to review, then: "
                 f"report type='completed' if the work looks good, or type='failed' if it does not. "
-                f"Do NOT report type='assessment' — that will leave the task stuck forever."
+                f"If you keep reporting type='assessment', the system will auto-finalize after repeated checks."
             )
         elif task and task.completion_deferred and worker_running:
             # Worker still running but reported completion — verify
@@ -1026,7 +846,6 @@ class SupervisorThread:
             task_id=self.task_id,
             prompt=self.prompt,
             worker_session_id=self.worker_session_id or "(unknown)",
-            supervisor_instructions=self.supervisor_instructions or "(none specified — use your best judgment)",
             workspace_root=ws_root,
         )
         _write_instructions_file(sup_dir, instructions)
@@ -1179,7 +998,6 @@ class WorkerPool:
         worker_session_id: Optional[str] = None,
         check_interval: int = 600,
         on_output: Optional[Callable[[str, str], None]] = None,
-        supervisor_instructions: str = "",
         working_dir: Optional[str] = None,
         task_manager: Optional[Any] = None,
     ) -> SupervisorThread:
@@ -1203,7 +1021,6 @@ class WorkerPool:
                 check_interval=check_interval,
                 on_output=on_output,
                 timeout=effective_timeout,
-                supervisor_instructions=supervisor_instructions,
                 working_dir=working_dir,
                 root_workspace_dir=self.root_workspace_dir,
                 task_manager=task_manager,
@@ -1220,6 +1037,26 @@ class WorkerPool:
                 self._workers[task_id].stop()
             if task_id in self._supervisors:
                 self._supervisors[task_id].stop()
+
+    def stop_worker(self, task_id: str, wait_seconds: float = 5.0) -> None:
+        """Stop only the worker for a task and wait briefly for thread exit."""
+        worker: Optional[WorkerThread] = None
+        with self._lock:
+            worker = self._workers.get(task_id)
+            if worker:
+                worker.stop()
+        if not worker:
+            return
+        deadline = time.monotonic() + max(wait_seconds, 0.0)
+        while worker.is_running and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+    def stop_supervisor(self, task_id: str) -> None:
+        """Stop only the supervisor for a task."""
+        with self._lock:
+            supervisor = self._supervisors.get(task_id)
+            if supervisor:
+                supervisor.stop()
 
     def stop_all(self) -> None:
         """Stop all workers and supervisors."""
