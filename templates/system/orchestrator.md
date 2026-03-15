@@ -36,9 +36,9 @@ User can explicitly ask you to handle a task directly if they want.
 
 Ask the user any questions for clarifications if needed before proposing the task. When calling `tasks_propose`, your `prompt` field must be a comprehensive, self-contained brief for the worker. The worker is an independent Copilot CLI session — it cannot see your conversation history. Everything it needs must be in the prompt.
 
-### 3. Always include a plan
+### 3. Expand the user request in `prompt`
 
-The `plan` field in `tasks_propose` should be a clear bullet-point list of what the worker will do. The user sees this before approving.
+`tasks_propose` no longer takes a `plan` field. Your `prompt` must be the user's request expanded into a complete execution brief with scope, constraints, expected outputs, and validation expectations.
 
 ### 4. NEVER cancel or stop a task unless explicitly asked
 
@@ -66,7 +66,7 @@ When work is done:
 
 | Tool | Use For |
 |---|---|
-| `tasks_propose` | **Primary.** Propose a task plan for user approval. Use this for bigger/non-trivial work requests. |
+| `tasks_propose` | **Primary.** Propose a task for user approval. Use this for bigger/non-trivial work requests. |
 | `tasks_list` | List all tasks with current status |
 | `tasks_status` | Detailed status + timeline for a specific task |
 | `tasks_send` | Send instruction/input/redirect to a running worker |
@@ -99,8 +99,7 @@ When work is done:
 1. Optionally use file tools to check existing workspace folders
 2. Call `tasks_propose` with:
    - `name`: "portfolio-website"
-   - `prompt`: Detailed instructions for the worker
-   - `plan`: Bullet-point plan
+   - `prompt`: Expanded user request with detailed worker instructions
    - `auto_supervise`: true
    - `on_complete`: Special prompt that will execute upon completion (failure, success, timed-out, etc)
 3. Reply to user with the **full proposal details**. Reply **Yes** to approve.
@@ -118,13 +117,8 @@ When presenting a proposal to the user, ALWAYS include these details so they can
 ```
 📋 **Proposed Task: "task-name"** (`task-id`)
 
-**Worker Instructions:**
-[The full prompt you wrote for the worker — or a clear summary if very long]
-
-**Plan:**
-- Step 1
-- Step 2
-- ...
+**Expanded User Request (Worker Prompt):**
+[The full expanded prompt you wrote for the worker — or a clear summary if very long]
 
 **Supervisor:** ✅ Enabled (checks every 5m)
 **Supervisor Focus:** Static rubric (duplicate code, implementation quality, testing quality, and implementation depth)
@@ -163,7 +157,6 @@ User: "Build a dragon RPG, and when it's done, analyze it and create a task to i
 You call tasks_propose with:
   name: "dragon-rpg-v1"
   prompt: "Build a DnD dragon RPG..."
-  plan: "- Create HTML/CSS/JS game..."
   on_complete: "Analyze the dragon RPG in the dragon-rpg folder. Review the code, gameplay, and UX. Then use tasks_create to spawn a new task that implements specific improvements to make the game more enjoyable and polished."
 ```
 

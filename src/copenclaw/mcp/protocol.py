@@ -187,13 +187,12 @@ TASK_TOOLS = [
     # ── Orchestrator-level tools ──
     {
         "name": "tasks_propose",
-        "description": "Propose a task plan for user approval. Creates a proposal that the user must approve (Yes) or reject (No) before workers are spawned. Use this for any complex multi-step work.",
+        "description": "Propose a task for user approval. Provide an expanded, self-contained prompt based on the user's request. The user must approve (Yes) or reject (No) before workers are spawned.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Human-readable task name (auto-generated if omitted)"},
-                "prompt": {"type": "string", "description": "The detailed instructions for the worker"},
-                "plan": {"type": "string", "description": "A clear bullet-point plan of what the worker will do"},
+                "prompt": {"type": "string", "description": "Expanded, self-contained worker brief based on the user's request"},
                 "channel": {"type": "string", "enum": ["telegram", "teams", "whatsapp", "signal", "slack"], "description": "Where to report results"},
                 "target": {"type": "string", "description": "Chat ID, conversation ID, phone number, or Slack channel ID for notifications"},
                 "service_url": {"type": "string", "description": "Required for Teams"},
@@ -203,7 +202,7 @@ TASK_TOOLS = [
                 "continuous": {"type": "object", "description": "Continuous improvement configuration when task_type=continuous_improvement"},
                 "on_complete": {"type": "string", "description": "A prompt to feed to the orchestrator when this task finishes (success, failure, or cancellation). Use this for chaining tasks or retrying on failure. The hook prompt includes the terminal reason so the orchestrator can react appropriately."},
             },
-            "required": ["prompt", "plan"],
+            "required": ["prompt"],
         },
     },
     {
@@ -1041,7 +1040,6 @@ class MCPProtocolHandler:
         task = tm.create_task(
             name=name,
             prompt=task_prompt,
-            plan=args.get("plan", ""),
             task_type=self._resolve_task_type(args),
             ci_config=args.get("continuous"),
             channel=channel,
@@ -1061,23 +1059,30 @@ class MCPProtocolHandler:
                 "task_id": task.task_id,
                 "name": task.name,
                 "prompt": task.prompt,
-                "plan": getattr(task, "plan", None),
                 "auto_supervise": task.auto_supervise,
                 "channel": getattr(task, "channel", ""),
                 "target": getattr(task, "target", ""),
                 "task_type": getattr(task, "task_type", "standard"),
             })
 
-        # NOTE: We do NOT send a notification here.  The orchestrator's own
-        # chat response (returned via handle_chat → Telegram) already tells
-        # the user about the proposal.  Sending a second notification would
-        # cause the user to see two "proposed task" messages.
+        if task.channel == "telegram" and task.target and self.telegram_token:
+            interval = int(task.check_interval or 0)
+            interval_label = f"{interval}s" if interval < 60 else f"{max(1, interval // 60)}m"
+            proposal_msg = (
+                "📋 Task proposal ready\n"
+                f"🧩 Name: {task.name}\n"
+                f"🆔 ID: {task.task_id}\n"
+                f"📝 Expanded request:\n{self._clip_text(task.prompt, 1200)}\n\n"
+                f"👀 Supervisor: {'✅ Enabled' if task.auto_supervise else '❌ Disabled'} ({interval_label})\n"
+                "✅ Reply Yes to approve\n"
+                "❌ Reply No to reject"
+            )
+            self._send_notification(task.channel, task.target, proposal_msg, task.service_url)
 
         return {
             "task_id": task.task_id,
             "name": task.name,
             "status": "proposed",
-            "plan": task.plan,
             "auto_supervise": task.auto_supervise,
             "task_type": task.task_type,
             "message": "Proposal sent to user. Waiting for approval.",

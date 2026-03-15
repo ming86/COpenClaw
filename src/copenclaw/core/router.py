@@ -567,6 +567,8 @@ def _cmd_task_detail(tm: Optional[TaskManager], pool: Optional[WorkerPool], task
     ]
     if task.plan:
         lines.append(f"\n**Plan:**\n{task.plan}")
+    else:
+        lines.append(f"\n**Prompt:**\n{(task.prompt or '')[:1200]}")
     lines.append(f"\n**Timeline (last 10):**\n{task.concise_timeline(10)}")
     return ChatResponse(text="\n".join(lines))
 
@@ -579,7 +581,9 @@ def _cmd_proposed(tm: Optional[TaskManager]) -> ChatResponse:
     lines = []
     for t in proposed:
         age = _time_ago(t.created_at)
-        lines.append(f"📋 **{t.name}** (`{t.task_id}`) — proposed {age}\n   Plan: {(t.plan or 'N/A')[:100]}")
+        summary = (t.plan or t.prompt or "N/A")[:100]
+        summary_label = "Plan" if t.plan else "Prompt"
+        lines.append(f"📋 **{t.name}** (`{t.task_id}`) — proposed {age}\n   {summary_label}: {summary}")
     header = f"📋 **{len(proposed)} proposal(s) awaiting approval:**\n"
     return ChatResponse(text=header + "\n\n".join(lines))
 

@@ -742,7 +742,6 @@ class TestE2ETaskFlow:
         # Step 1: Propose
         result = self._call_tool(handler, "tasks_propose", {
             "prompt": "Create a hello.py file",
-            "plan": "- Create hello.py\n- Test it",
         })
         assert result["status"] == "proposed"
         task_id = result["task_id"]
@@ -762,6 +761,28 @@ class TestE2ETaskFlow:
         # Worker should have appended logs
         logs = self._call_tool(handler, "tasks_logs", {"task_id": task_id})
         assert "Starting work" in logs["logs"]
+
+    @patch("copenclaw.mcp.protocol.TelegramAdapter")
+    def test_tasks_propose_telegram_notification_uses_emojis(self, mock_telegram, tmp_path):
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        handler = self._make_handler(data_dir, telegram_token="fake-token")
+
+        result = self._call_tool(handler, "tasks_propose", {
+            "prompt": "Build a small script and validate it",
+            "channel": "telegram",
+            "target": "999",
+        })
+        assert result["status"] == "proposed"
+
+        mock_telegram.return_value.send_message.assert_called_once()
+        kwargs = mock_telegram.return_value.send_message.call_args.kwargs
+        assert kwargs.get("chat_id") == 999
+        text = kwargs.get("text", "")
+        assert "📋" in text
+        assert "📝 Expanded request" in text
+        assert "✅ Reply Yes to approve" in text
+        assert "❌ Reply No to reject" in text
 
     @patch("copenclaw.core.worker.subprocess.Popen")
     @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")
