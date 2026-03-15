@@ -651,7 +651,9 @@ copenclaw/
 │       └── server.py          # MCP REST sub-router
 ├── systemprompts/
 │   ├── orchestrator.md        # Orchestrator system prompt
-│   ├── worker.md              # Worker system prompt
+│   ├── worker_instructions.md # Worker instructions system prompt
+│   ├── worker_start_session_prompt.md  # Fresh worker-session kickoff prompt
+│   ├── worker_resume_session_prompt.md # Resumed worker-session kickoff prompt
 │   └── supervisor.md          # Supervisor system prompt
 ├── tests/                     # 265 tests
 ├── scripts/

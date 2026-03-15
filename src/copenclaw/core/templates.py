@@ -100,7 +100,7 @@ def orchestrator_template() -> str:
 
 def worker_template(*, task_id: str, prompt: str, workspace_root: str) -> str:
     """Return rendered worker instructions for a specific task."""
-    return load_template("worker", task_id=task_id, prompt=prompt, workspace_root=workspace_root)
+    return load_template("worker_instructions", task_id=task_id, prompt=prompt, workspace_root=workspace_root)
 
 def supervisor_template(
     *,
@@ -128,11 +128,21 @@ def starter_template(**kwargs: str) -> str:
     return load_template("starter", **kwargs)
 
 
+def worker_session_start_prompt(*, task_id: str) -> str:
+    """Return trigger prompt for a fresh worker session start."""
+    return load_template("worker_start_session_prompt", task_id=task_id)
+
+
+def worker_resume_session_prompt(*, task_id: str) -> str:
+    """Return trigger prompt for a resumed worker session."""
+    return load_template("worker_resume_session_prompt", task_id=task_id)
+
+
 def worker_launch_prompt(*, task_id: str) -> str:
-    """Return trigger prompt for a fresh worker launch."""
-    return load_template("worker_launch", task_id=task_id)
+    """Deprecated alias; use worker_session_start_prompt()."""
+    return worker_session_start_prompt(task_id=task_id)
 
 
 def worker_resume_prompt(*, task_id: str) -> str:
-    """Return trigger prompt for a resumed worker launch."""
-    return load_template("worker_resume", task_id=task_id)
+    """Deprecated alias; use worker_resume_session_prompt()."""
+    return worker_resume_session_prompt(task_id=task_id)

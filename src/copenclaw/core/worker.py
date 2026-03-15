@@ -37,8 +37,8 @@ from copenclaw.core.logging_config import (
     get_worker_log_dir,
 )
 from copenclaw.core.templates import (
-    worker_launch_prompt,
-    worker_resume_prompt,
+    worker_session_start_prompt,
+    worker_resume_session_prompt,
     worker_template,
     supervisor_template,
 )
@@ -122,7 +122,7 @@ def _collect_child_processes(root_pid: int) -> list[int]:
 # Source-of-truth system prompts live in systemprompts/*.md and are
 # loaded via copenclaw.core.templates.
 
-WORKER_INSTRUCTIONS_TEMPLATE_REMOVED = "Deprecated: use systemprompts/worker.md"
+WORKER_INSTRUCTIONS_TEMPLATE_REMOVED = "Deprecated: use systemprompts/worker_instructions.md"
 SUPERVISOR_INSTRUCTIONS_TEMPLATE = "Deprecated: use systemprompts/supervisor.md"
 
 
@@ -481,9 +481,9 @@ class WorkerThread:
             # Build the command — short trigger prompt since instructions are in the file
             cmd = cli.build_launch_command(require_subprocess=True)
             if self.resume_session_id:
-                cmd.extend(["-p", worker_resume_prompt(task_id=self.task_id)])
+                cmd.extend(["-p", worker_resume_session_prompt(task_id=self.task_id)])
             else:
-                cmd.extend(["-p", worker_launch_prompt(task_id=self.task_id)])
+                cmd.extend(["-p", worker_session_start_prompt(task_id=self.task_id)])
 
             env = os.environ.copy()
             env.setdefault("TERM", "dumb")
