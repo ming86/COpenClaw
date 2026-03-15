@@ -1071,6 +1071,7 @@ def create_app() -> FastAPI:
     tg_adapter: TelegramAdapter | None = None
     terminal_thread: threading.Thread | None = None
     _terminal_io_lock = threading.Lock()
+    _chat_context_lock = threading.Lock()
 
     def _terminal_width() -> int:
         try:
@@ -1103,6 +1104,18 @@ def create_app() -> FastAPI:
             f"📊 Tasks running:{running} proposed:{proposed} done:{completed} failed:{failed} | "
             f"🧠 Brain:{brain} | 👷 Active workers:{worker_pool.active_count()}"
         )
+
+    def _terminal_spinner(stop_event_local: threading.Event, label: str = "Working") -> None:
+        if not terminal_enabled:
+            return
+        frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        idx = 0
+        while not stop_event_local.wait(0.1):
+            with _terminal_io_lock:
+                print(f"\r{frames[idx % len(frames)]} {label}...", end="", flush=True)
+            idx += 1
+        with _terminal_io_lock:
+            print("\r" + (" " * (_terminal_width() - 1)) + "\r", end="", flush=True)
 
     # ---- Telegram message dedup ----
     _tg_seen_msgs: set[int] = set()
@@ -1170,6 +1183,37 @@ def create_app() -> FastAPI:
                 _terminal_emit_block("Auto-repair", text, emoji="🛠️")
         except Exception as exc:  # noqa: BLE001
             logger.error("Repair notification failed (%s): %s", channel, exc)
+
+    def _mirror_activity(channel: str, target: str, text: str, service_url: str = "") -> None:
+        if not terminal_enabled:
+            return
+        header = f"{channel}:{target}"
+        _terminal_emit_block(f"Activity [{header}]", text, emoji="📡")
+
+    def _run_chat_request(chat_req: ChatRequest, *, allow_from: list[str], owner_id: str | None) -> Any:
+        with _chat_context_lock:
+            mcp_handler.set_default_channel_target(chat_req.channel, chat_req.chat_id, chat_req.service_url or "")
+            try:
+                return handle_chat(
+                    chat_req,
+                    pairing=pairing,
+                    sessions=sessions,
+                    cli=cli,
+                    allow_from=allow_from,
+                    data_dir=settings.data_dir,
+                    owner_id=owner_id,
+                    task_manager=task_manager,
+                    scheduler=scheduler,
+                    worker_pool=worker_pool,
+                    on_task_approved=_on_task_approved,
+                    on_task_cancelled=_on_task_cancelled,
+                    on_task_retry_approved=_on_task_retry_approved,
+                    on_task_retry_rejected=_on_task_retry_rejected,
+                    on_restart=_restart_app,
+                    on_repair=_on_repair,
+                )
+            finally:
+                mcp_handler.clear_default_channel_target()
 
     def _on_repair(description: str, req: ChatRequest) -> None:
         from copenclaw.core.repair import run_repair
@@ -1286,29 +1330,23 @@ def create_app() -> FastAPI:
                 chat_id=terminal_chat_id,
                 text=text,
             )
+            spinner_stop = threading.Event()
+            spinner_thread = threading.Thread(
+                target=_terminal_spinner,
+                args=(spinner_stop, "Thinking"),
+                daemon=True,
+                name="terminal-spinner",
+            )
+            spinner_thread.start()
             try:
-                resp = handle_chat(
-                    chat_req,
-                    pairing=pairing,
-                    sessions=sessions,
-                    cli=cli,
-                    allow_from=[terminal_sender_id],
-                    data_dir=settings.data_dir,
-                    owner_id=terminal_sender_id,
-                    task_manager=task_manager,
-                    scheduler=scheduler,
-                    worker_pool=worker_pool,
-                    on_task_approved=_on_task_approved,
-                    on_task_cancelled=_on_task_cancelled,
-                    on_task_retry_approved=_on_task_retry_approved,
-                    on_task_retry_rejected=_on_task_retry_rejected,
-                    on_restart=_restart_app,
-                    on_repair=_on_repair,
-                )
+                resp = _run_chat_request(chat_req, allow_from=[terminal_sender_id], owner_id=terminal_sender_id)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Terminal chat handling failed: %s", exc)
                 _terminal_emit_block("Runtime error", "An internal error occurred. Run /repair to start diagnostics.", emoji="⚠️")
                 continue
+            finally:
+                spinner_stop.set()
+                spinner_thread.join(timeout=1.0)
 
             _terminal_emit_block("Assistant", resp.text, emoji="🤖")
 
@@ -1362,10 +1400,12 @@ def create_app() -> FastAPI:
             return
 
         logger.info("Telegram poll: [%s] %s", sender_id_str, text[:80])
+        _mirror_activity("telegram", str(chat_id), f"⬅️ {sender_id_str}: {text}")
 
         # Show "typing..." while the brain is thinking
         tg = _telegram_adapter()
         typing_stop = tg.start_typing_loop(chat_id)
+        _mirror_activity("telegram", str(chat_id), f"⬅️ {sender_id_str}: {text}")
 
         chat_req = ChatRequest(
             channel="telegram",
@@ -1374,23 +1414,10 @@ def create_app() -> FastAPI:
             text=text,
         )
         try:
-            resp = handle_chat(
+            resp = _run_chat_request(
                 chat_req,
-                pairing=pairing,
-                sessions=sessions,
-                cli=cli,
                 allow_from=settings.telegram_allow_from,
-                data_dir=settings.data_dir,
                 owner_id=settings.telegram_owner_chat_id,
-                task_manager=task_manager,
-                scheduler=scheduler,
-                worker_pool=worker_pool,
-                on_task_approved=_on_task_approved,
-                on_task_cancelled=_on_task_cancelled,
-                on_task_retry_approved=_on_task_retry_approved,
-                on_task_retry_rejected=_on_task_retry_rejected,
-                on_restart=_restart_app,
-                on_repair=_on_repair,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Telegram poll chat handling failed: %s", exc)
@@ -1399,6 +1426,7 @@ def create_app() -> FastAPI:
         finally:
             typing_stop.set()
         tg.send_message(chat_id=chat_id, text=resp.text)
+        _mirror_activity("telegram", str(chat_id), f"➡️ bot: {resp.text}")
 
     # ---- lifespan ----
 
@@ -1579,23 +1607,10 @@ def create_app() -> FastAPI:
             text=text,
         )
         try:
-            resp = handle_chat(
+            resp = _run_chat_request(
                 chat_req,
-                pairing=pairing,
-                sessions=sessions,
-                cli=cli,
                 allow_from=settings.telegram_allow_from,
-                data_dir=settings.data_dir,
                 owner_id=settings.telegram_owner_chat_id,
-                task_manager=task_manager,
-                scheduler=scheduler,
-                worker_pool=worker_pool,
-                on_task_approved=_on_task_approved,
-                on_task_cancelled=_on_task_cancelled,
-                on_task_retry_approved=_on_task_retry_approved,
-                on_task_retry_rejected=_on_task_retry_rejected,
-                on_restart=_restart_app,
-                on_repair=_on_repair,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Telegram webhook chat handling failed: %s", exc)
@@ -1604,6 +1619,7 @@ def create_app() -> FastAPI:
         finally:
             typing_stop.set()
         tg.send_message(chat_id=chat_id, text=resp.text)
+        _mirror_activity("telegram", str(chat_id), f"➡️ bot: {resp.text}")
         return {"status": resp.status}
 
     # ---- Teams webhook ----
@@ -1654,23 +1670,10 @@ def create_app() -> FastAPI:
             text=text,
             service_url=service_url,
         )
-        resp = handle_chat(
+        resp = _run_chat_request(
             chat_req,
-            pairing=pairing,
-            sessions=sessions,
-            cli=cli,
             allow_from=settings.msteams_allow_from,
-            data_dir=settings.data_dir,
             owner_id=None,
-            task_manager=task_manager,
-            scheduler=scheduler,
-            worker_pool=worker_pool,
-            on_task_approved=_on_task_approved,
-            on_task_cancelled=_on_task_cancelled,
-            on_task_retry_approved=_on_task_retry_approved,
-            on_task_retry_rejected=_on_task_retry_rejected,
-            on_restart=_restart_app,
-            on_repair=_on_repair,
         )
         _teams_adapter().send_message(
             service_url=service_url,
@@ -1741,23 +1744,10 @@ def create_app() -> FastAPI:
                 chat_id=sender,
                 text=text,
             )
-            resp = handle_chat(
+            resp = _run_chat_request(
                 chat_req,
-                pairing=pairing,
-                sessions=sessions,
-                cli=cli,
                 allow_from=settings.whatsapp_allow_from,
-                data_dir=settings.data_dir,
                 owner_id=None,
-                task_manager=task_manager,
-                scheduler=scheduler,
-                worker_pool=worker_pool,
-                on_task_approved=_on_task_approved,
-                on_task_cancelled=_on_task_cancelled,
-                on_task_retry_approved=_on_task_retry_approved,
-                on_task_retry_rejected=_on_task_retry_rejected,
-                on_restart=_restart_app,
-                on_repair=_on_repair,
             )
             adapter.send_message(to=sender, text=resp.text)
 
@@ -1795,23 +1785,10 @@ def create_app() -> FastAPI:
             chat_id=sender,
             text=text,
         )
-        resp = handle_chat(
+        resp = _run_chat_request(
             chat_req,
-            pairing=pairing,
-            sessions=sessions,
-            cli=cli,
             allow_from=settings.signal_allow_from,
-            data_dir=settings.data_dir,
             owner_id=None,
-            task_manager=task_manager,
-            scheduler=scheduler,
-            worker_pool=worker_pool,
-            on_task_approved=_on_task_approved,
-            on_task_cancelled=_on_task_cancelled,
-            on_task_retry_approved=_on_task_retry_approved,
-            on_task_retry_rejected=_on_task_retry_rejected,
-            on_restart=_restart_app,
-            on_repair=_on_repair,
         )
         sig.send_message(recipient=sender, text=resp.text)
 
@@ -1871,23 +1848,10 @@ def create_app() -> FastAPI:
             chat_id=channel_id,
             text=text,
         )
-        resp = handle_chat(
+        resp = _run_chat_request(
             chat_req,
-            pairing=pairing,
-            sessions=sessions,
-            cli=cli,
             allow_from=settings.slack_allow_from,
-            data_dir=settings.data_dir,
             owner_id=None,
-            task_manager=task_manager,
-            scheduler=scheduler,
-            worker_pool=worker_pool,
-            on_task_approved=_on_task_approved,
-            on_task_cancelled=_on_task_cancelled,
-            on_task_retry_approved=_on_task_retry_approved,
-            on_task_retry_rejected=_on_task_retry_rejected,
-            on_restart=_restart_app,
-            on_repair=_on_repair,
         )
         _slack_adapter().send_message(channel=channel_id, text=resp.text)
         return {"status": resp.status}
@@ -1914,6 +1878,7 @@ def create_app() -> FastAPI:
         msteams_creds=msteams_creds,
         task_manager=task_manager,
         worker_pool=worker_pool,
+        notify_callback=_mirror_activity,
         owner_chat_id=settings.telegram_owner_chat_id,
         execution_policy=execution_policy,
     )

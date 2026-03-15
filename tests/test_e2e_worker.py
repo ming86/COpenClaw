@@ -784,6 +784,55 @@ class TestE2ETaskFlow:
         assert "✅ Reply Yes to approve" in text
         assert "❌ Reply No to reject" in text
 
+    def test_tasks_propose_uses_default_channel_target_context(self, tmp_path):
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        handler = self._make_handler(data_dir)
+        mirrored: list[tuple[str, str, str]] = []
+        handler.notify_callback = lambda channel, target, text, service_url="": mirrored.append((channel, target, text))
+        handler.set_default_channel_target("terminal", "terminal-console")
+
+        result = self._call_tool(handler, "tasks_propose", {
+            "prompt": "Investigate issue and propose fix",
+        })
+        assert result["status"] == "proposed"
+
+        task = handler.task_manager.get(result["task_id"])
+        assert task is not None
+        assert task.channel == "terminal"
+        assert task.target == "terminal-console"
+        assert mirrored
+        assert mirrored[-1][0] == "terminal"
+        assert mirrored[-1][1] == "terminal-console"
+
+    def test_task_report_notify_uses_notify_callback(self, tmp_path):
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        handler = self._make_handler(data_dir)
+        mirrored: list[tuple[str, str, str]] = []
+        handler.notify_callback = lambda channel, target, text, service_url="": mirrored.append((channel, target, text))
+
+        task = handler.task_manager.create_task(
+            name="notify-test",
+            prompt="do work",
+            channel="telegram",
+            target="12345",
+            auto_supervise=False,
+            status="running",
+        )
+
+        result = self._call_tool(handler, "task_report", {
+            "task_id": task.task_id,
+            "type": "progress",
+            "summary": "Progress update",
+            "notify_user": True,
+            "from_tier": "worker",
+        })
+        assert result["status"] == "reported"
+        assert mirrored
+        assert mirrored[-1][0] == "telegram"
+        assert "Task 'notify-test'" in mirrored[-1][2]
+
     @patch("copenclaw.core.worker.subprocess.Popen")
     @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")
     @patch("copenclaw.mcp.protocol.TelegramAdapter")

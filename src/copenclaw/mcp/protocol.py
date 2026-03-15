@@ -423,6 +423,22 @@ class MCPProtocolHandler:
         self.restart_callback: Any = None
         self._worker_relaunch_lock = threading.Lock()
         self._worker_relaunch_requested: set[str] = set()
+        self._default_target_lock = threading.Lock()
+        self._default_channel = ""
+        self._default_target = ""
+        self._default_service_url = ""
+
+    def set_default_channel_target(self, channel: str, target: str, service_url: str = "") -> None:
+        with self._default_target_lock:
+            self._default_channel = str(channel or "")
+            self._default_target = str(target or "")
+            self._default_service_url = str(service_url or "")
+
+    def clear_default_channel_target(self) -> None:
+        with self._default_target_lock:
+            self._default_channel = ""
+            self._default_target = ""
+            self._default_service_url = ""
 
     def handle_request(
         self,
@@ -1007,6 +1023,11 @@ class MCPProtocolHandler:
         """Resolve channel and target, falling back to owner Telegram chat."""
         channel = args.get("channel", "")
         target = args.get("target", "")
+        if not channel and not target:
+            with self._default_target_lock:
+                if self._default_channel and self._default_target:
+                    channel = self._default_channel
+                    target = self._default_target
         if not channel and not target and self.owner_chat_id:
             channel = "telegram"
             target = self.owner_chat_id
@@ -1065,7 +1086,7 @@ class MCPProtocolHandler:
                 "task_type": getattr(task, "task_type", "standard"),
             })
 
-        if task.channel == "telegram" and task.target and self.telegram_token:
+        if task.channel and task.target:
             interval = int(task.check_interval or 0)
             interval_label = f"{interval}s" if interval < 60 else f"{max(1, interval // 60)}m"
             proposal_msg = (
@@ -2623,6 +2644,11 @@ class MCPProtocolHandler:
         if not channel or not target:
             logger.debug("Skipping notification: no channel/target")
             return
+        if self.notify_callback:
+            try:
+                self.notify_callback(channel, target, text, service_url)
+            except Exception:  # noqa: BLE001
+                logger.debug("notify_callback failed", exc_info=True)
         try:
             if channel == "telegram" and self.telegram_token:
                 TelegramAdapter(self.telegram_token).send_message(chat_id=int(target), text=text)
@@ -2714,6 +2740,11 @@ class MCPProtocolHandler:
                         sl.send_message(channel=task.target, text=text)
         except Exception as exc:  # noqa: BLE001
             logger.error("Failed to notify user about task %s: %s", task_id, exc)
+        if self.notify_callback:
+            try:
+                self.notify_callback(task.channel, task.target, text, task.service_url)
+            except Exception:  # noqa: BLE001
+                logger.debug("notify_callback failed for task event", exc_info=True)
 
     def _log_task_event(
         self,
