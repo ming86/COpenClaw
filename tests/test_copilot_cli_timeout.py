@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import subprocess
 import sys
 import time
 from unittest.mock import patch
@@ -119,6 +120,48 @@ def test_run_prompt_cli_retries_without_silent_flag(tmp_path) -> None:
     assert len(launches) == 2
     assert "-s" in launches[0]
     assert "-s" not in launches[1]
+
+
+def test_run_prompt_cli_suppresses_timeout_after_kill(tmp_path) -> None:
+    cli = CopilotCli(timeout=0, workspace_dir=str(tmp_path))
+    cli._version_logged = True
+
+    class SlowKillProcess:
+        def __init__(self) -> None:
+            self.returncode = None
+            self.stdout = io.StringIO("partial-output\n")
+            self.wait_calls = 0
+
+        def poll(self):  # noqa: ANN001
+            return self.returncode
+
+        def wait(self, timeout=None):  # noqa: ANN001
+            self.wait_calls += 1
+            raise subprocess.TimeoutExpired(cmd="copilot", timeout=timeout)
+
+        def terminate(self) -> None:
+            return None
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    process = SlowKillProcess()
+    with (
+        patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot"),
+        patch("copenclaw.integrations.copilot_cli.subprocess.Popen", return_value=process),
+    ):
+        output = cli._run_prompt_cli(
+            prompt="ignored",
+            model=None,
+            cwd=str(tmp_path),
+            log_prefix="TEST",
+            resume_id=None,
+            allow_retry=False,
+            autopilot=None,
+            on_line=None,
+        )
+
+    assert "partial-output" in output
 
 
 def test_resolve_executable_prefers_exe_over_cmd_wrapper() -> None:

@@ -745,9 +745,10 @@ class TestE2ETaskFlow:
         })
         assert result["status"] == "proposed"
         task_id = result["task_id"]
+        approval_token = handler.task_manager.get(task_id).approval_token
 
         # Step 2: Approve
-        result = self._call_tool(handler, "tasks_approve", {"task_id": task_id})
+        result = self._call_tool(handler, "tasks_approve", {"task_id": task_id, "_approval_token": approval_token})
         assert result["status"] == "running"
 
         # Wait for worker to complete
@@ -832,6 +833,24 @@ class TestE2ETaskFlow:
         assert mirrored
         assert mirrored[-1][0] == "telegram"
         assert "Task 'notify-test'" in mirrored[-1][2]
+
+    def test_approve_requires_token(self, mock_telegram, tmp_path):
+        """Direct tasks_approve without proposal approval token should fail."""
+        data_dir = str(tmp_path / "data")
+        os.makedirs(data_dir)
+        handler = self._make_handler(data_dir)
+
+        proposed = self._call_tool(handler, "tasks_propose", {"prompt": "Token check task"})
+        task_id = proposed["task_id"]
+
+        response = handler.handle_request({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "tasks_approve", "arguments": {"task_id": task_id}},
+        })
+        text = response["result"]["content"][0]["text"]
+        assert "explicit user confirmation flow" in text
 
     @patch("copenclaw.core.worker.subprocess.Popen")
     @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")

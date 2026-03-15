@@ -184,6 +184,7 @@ class Task:
 
     # Plan (for proposed tasks awaiting approval)
     plan: str = ""                      # what the worker will do
+    approval_token: str = ""            # required proof for proposed-task approval
 
     # Supervision
     check_interval: int = 600           # seconds between supervisor checks
@@ -248,6 +249,7 @@ class Task:
             "target": self.target,
             "service_url": self.service_url,
             "plan": self.plan,
+            "approval_token": self.approval_token,
             "check_interval": self.check_interval,
             "auto_supervise": self.auto_supervise,
             "timeline": [e.to_dict() for e in self.timeline],
@@ -298,6 +300,7 @@ class Task:
             target=d.get("target", ""),
             service_url=d.get("service_url", ""),
             plan=d.get("plan", ""),
+            approval_token=d.get("approval_token", ""),
             check_interval=d.get("check_interval", 600),
             auto_supervise=d.get("auto_supervise", True),
             timeline=[TimelineEntry.from_dict(e) for e in d.get("timeline", [])],
@@ -892,6 +895,7 @@ class TaskManager:
             check_interval=check_interval,
             auto_supervise=auto_supervise,
             plan=plan,
+            approval_token=uuid.uuid4().hex if status == "proposed" else "",
             ci_config=normalized_ci_config,
             ci_state=ci_state,
         )
@@ -946,6 +950,18 @@ class TaskManager:
         if not proposed:
             return None
         return max(proposed, key=lambda t: t.created_at)
+
+    def ensure_proposal_approval_token(self, task_id: str) -> Optional[str]:
+        """Ensure a proposed task has a non-empty approval token and return it."""
+        task = self._tasks.get(task_id)
+        if not task or task.status != "proposed":
+            return None
+        if task.approval_token:
+            return task.approval_token
+        task.approval_token = uuid.uuid4().hex
+        task.updated_at = _now()
+        self._save()
+        return task.approval_token
 
     def update_status(self, task_id: str, status: str) -> Optional[Task]:
         """Update a task's status."""

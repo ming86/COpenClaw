@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -114,6 +115,48 @@ def test_startup_probe_kills_process_before_closing_log_handle(monkeypatch, tmp_
 
     assert events[0] == "kill_closed=False"
     assert events[-1] == "close"
+
+
+def test_startup_probe_suppresses_timeout_after_kill(monkeypatch, tmp_path) -> None:
+    probe_log = tmp_path / "probe.log"
+    monkeypatch.setenv("copenclaw_STARTER_COMMAND_JSON", json.dumps(["python", "-V"]))
+    monkeypatch.setenv("copenclaw_STARTER_HEALTH_URL", "http://127.0.0.1:18790/health")
+    monkeypatch.setenv("copenclaw_STARTER_PROBE_TIMEOUT", "30")
+    monkeypatch.setenv("copenclaw_STARTER_CWD", str(tmp_path))
+    monkeypatch.setenv("copenclaw_STARTER_PROBE_LOG", str(probe_log))
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode = None
+            self._wait_calls = 0
+            self.terminated = False
+            self.killed = False
+
+        def poll(self):  # noqa: ANN001
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def wait(self, timeout=None):  # noqa: ANN001
+            self._wait_calls += 1
+            if self._wait_calls <= 2:
+                raise subprocess.TimeoutExpired(cmd="starter-probe", timeout=timeout)
+            self.returncode = -9
+            return self.returncode
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+
+    fake = FakeProcess()
+    monkeypatch.setattr(starter.subprocess, "Popen", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(starter, "_healthcheck", lambda _url: (True, "status=ok"))
+
+    result = starter.startup_probe()
+    assert result["ok"] is True
+    assert fake.terminated is True
+    assert fake.killed is True
 
 
 def test_tail_lines_returns_last_nonempty_lines(tmp_path) -> None:
@@ -261,6 +304,43 @@ def test_run_startup_starter_continues_when_done_missing(monkeypatch, tmp_path) 
 
     assert result["status"] == "skipped"
     assert "did not call done" in result["note"].lower()
+
+
+def test_run_startup_starter_skips_when_done_marker_is_invalid_json(monkeypatch, tmp_path) -> None:
+    workspace_root = tmp_path / "workspace"
+    repo_root = tmp_path / "repo"
+    log_dir = tmp_path / "logs"
+    workspace_root.mkdir()
+    repo_root.mkdir()
+    log_dir.mkdir()
+
+    monkeypatch.setattr(starter, "starter_template", lambda **kwargs: "starter")
+
+    class FakeCli:
+        def __init__(self, **kwargs):  # noqa: ANN003
+            pass
+
+        def run_prompt(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            done_path = os.getenv("copenclaw_STARTER_DONE_PATH")
+            assert done_path
+            with open(done_path, "w", encoding="utf-8") as handle:
+                handle.write("{invalid")
+            return "starter output"
+
+    monkeypatch.setattr(starter, "CopilotCli", FakeCli)
+
+    result = starter.run_startup_starter(
+        host="127.0.0.1",
+        port=18790,
+        reload=False,
+        workspace_root=str(workspace_root),
+        repo_root=str(repo_root),
+        log_dir=str(log_dir),
+        timeout=60,
+    )
+
+    assert result["status"] == "skipped"
+    assert "unreadable completion marker" in result["note"].lower()
 
 
 def test_cli_serve_auto_repairs_and_retries_once(monkeypatch, tmp_path) -> None:

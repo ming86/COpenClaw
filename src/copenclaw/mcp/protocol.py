@@ -212,6 +212,7 @@ TASK_TOOLS = [
             "type": "object",
             "properties": {
                 "task_id": {"type": "string"},
+                "_approval_token": {"type": "string", "description": "Internal approval proof from chat Yes-flow"},
             },
             "required": ["task_id"],
         },
@@ -1119,6 +1120,16 @@ class MCPProtocolHandler:
             raise ValueError(f"Task not found: {args['task_id']}")
         if task.status != "proposed":
             raise ValueError(f"Task is not in proposed state (current: {task.status})")
+        expected_token = tm.ensure_proposal_approval_token(task.task_id) or ""
+        provided_token = str(args.get("_approval_token", "") or "").strip()
+        if not provided_token or provided_token != expected_token:
+            raise ValueError(
+                "Task approval requires an explicit user confirmation flow. "
+                "Reply Yes to the proposal message to approve."
+            )
+        task.approval_token = ""
+        task.updated_at = _now()
+        tm._save()
 
         return self._start_task(task)
 

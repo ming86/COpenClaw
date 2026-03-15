@@ -8,6 +8,7 @@ import os
 import secrets
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -28,6 +29,20 @@ _HEALTH_URL_ENV = "copenclaw_STARTER_HEALTH_URL"
 _PROBE_TIMEOUT_ENV = "copenclaw_STARTER_PROBE_TIMEOUT"
 _PROBE_CWD_ENV = "copenclaw_STARTER_CWD"
 _PROBE_LOG_ENV = "copenclaw_STARTER_PROBE_LOG"
+
+
+def _write_json_atomic(path: str, payload: dict[str, Any]) -> None:
+    target_dir = os.path.dirname(path) or "."
+    fd, temp_path = tempfile.mkstemp(prefix=".starter-", suffix=".json.tmp", dir=target_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(temp_path)
 
 
 def _tail_lines(path: str, *, max_lines: int = 120) -> list[str]:
@@ -95,8 +110,7 @@ def done(note: str = "startup verified") -> dict[str, Any]:
     marker_dir = os.path.dirname(marker_path)
     if marker_dir:
         os.makedirs(marker_dir, exist_ok=True)
-    with open(marker_path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2)
+    _write_json_atomic(marker_path, payload)
     append_to_file(get_activity_log_path(), f"[STARTER] done() called: {payload['note']}")
     return payload
 
@@ -162,7 +176,8 @@ def startup_probe() -> dict[str, Any]:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     process.kill()
-                    process.wait(timeout=5)
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        process.wait(timeout=5)
                 return {
                     "ok": True,
                     "health_url": health_url,
@@ -176,7 +191,8 @@ def startup_probe() -> dict[str, Any]:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             process.kill()
-            process.wait(timeout=5)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=5)
         return {
             "ok": False,
             "reason": "timeout",
@@ -281,8 +297,17 @@ def run_startup_starter(
             "starter_output": output[:8000],
         }
 
-    with open(done_path, "r", encoding="utf-8") as handle:
-        payload = json.load(handle)
+    try:
+        with open(done_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        note = "Startup starter wrote an unreadable completion marker; continuing without starter confirmation."
+        logger.warning(note)
+        return {
+            "status": "skipped",
+            "note": note,
+            "starter_output": output[:8000],
+        }
     if payload.get("token") != done_token:
         raise CopilotCliError("Startup starter completion token mismatch.")
 

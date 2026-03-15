@@ -597,7 +597,10 @@ class CopilotCli:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 process.kill()
-                process.wait(timeout=5)
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    logger.warning("%s | Copilot CLI process did not exit after kill()", log_prefix)
         except CopilotCliError:
             raise
         except Exception as exc:
