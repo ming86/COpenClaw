@@ -737,8 +737,14 @@ class TestE2ETaskFlow:
         proposed = self._call_tool(handler, "tasks_propose", {"prompt": "Token check task"})
         task_id = proposed["task_id"]
 
-        with pytest.raises(ValueError, match="explicit user confirmation flow"):
-            self._call_tool(handler, "tasks_approve", {"task_id": task_id})
+        response = handler.handle_request({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "tasks_approve", "arguments": {"task_id": task_id}},
+        })
+        text = response["result"]["content"][0]["text"]
+        assert "explicit user confirmation flow" in text
 
     @patch("copenclaw.core.worker.subprocess.Popen")
     @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")
