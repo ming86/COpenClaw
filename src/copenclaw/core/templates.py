@@ -110,7 +110,7 @@ def orchestrator_template() -> str:
 def worker_template(*, task_id: str, prompt: str, workspace_root: str) -> str:
     """Return rendered worker instructions for a specific task."""
     return load_template(
-        "worker_instructions",
+        "worker",
         category="system",
         task_id=task_id,
         prompt=prompt,

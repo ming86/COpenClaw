@@ -649,7 +649,7 @@ copenclaw/
 ├── templates/
 │   ├── system/
 │   │   ├── orchestrator.md        # Orchestrator system prompt
-│   │   ├── worker_instructions.md # Worker instructions system prompt
+│   │   ├── worker.md              # Worker instructions system prompt
 │   │   ├── supervisor.md          # Supervisor system prompt
 │   │   ├── starter.md             # Startup recovery system prompt
 │   │   └── repair.md              # Runtime repair system prompt
