@@ -57,6 +57,62 @@ def test_startup_probe_succeeds_and_stops_process(monkeypatch, tmp_path) -> None
     assert fake.terminated is True
 
 
+def test_tail_lines_returns_last_nonempty_lines(tmp_path) -> None:
+    log_path = tmp_path / "starter.log"
+    log_path.write_text("line-1\n\nline-2\nline-3\nline-4\n", encoding="utf-8")
+    assert starter._tail_lines(str(log_path), max_lines=2) == ["line-3", "line-4"]
+
+
+def test_healthcheck_requires_explicit_ok_status(monkeypatch) -> None:
+    class FakeResponse:
+        def __init__(self, status: int, body: str) -> None:
+            self.status = status
+            self._body = body.encode("utf-8")
+
+        def __enter__(self):  # noqa: ANN001
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001, ANN201
+            return False
+
+        def read(self, _size: int = -1) -> bytes:
+            return self._body
+
+    monkeypatch.setattr(
+        starter.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: FakeResponse(200, '{"status":"not ok"}'),
+    )
+    healthy, detail = starter._healthcheck("http://127.0.0.1:18790/health")
+    assert healthy is False
+    assert detail == "status=not ok"
+
+
+def test_healthcheck_accepts_json_status_ok(monkeypatch) -> None:
+    class FakeResponse:
+        def __init__(self, status: int, body: str) -> None:
+            self.status = status
+            self._body = body.encode("utf-8")
+
+        def __enter__(self):  # noqa: ANN001
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001, ANN201
+            return False
+
+        def read(self, _size: int = -1) -> bytes:
+            return self._body
+
+    monkeypatch.setattr(
+        starter.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: FakeResponse(200, '{"status":"ok"}'),
+    )
+    healthy, detail = starter._healthcheck("http://127.0.0.1:18790/health")
+    assert healthy is True
+    assert detail == "status=ok"
+
+
 def test_cli_serve_runs_startup_starter_before_uvicorn(monkeypatch, tmp_path) -> None:
     calls: list[str] = []
     monkeypatch.delenv("copenclaw_SKIP_STARTER", raising=False)

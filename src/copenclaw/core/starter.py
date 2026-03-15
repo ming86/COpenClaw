@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+from collections import deque
 import json
 import logging
 import os
@@ -33,9 +34,12 @@ def _tail_lines(path: str, *, max_lines: int = 120) -> list[str]:
     if not path or not os.path.isfile(path):
         return []
     try:
+        tail: deque[str] = deque(maxlen=max_lines)
         with open(path, "r", encoding="utf-8") as handle:
-            lines = [line.rstrip() for line in handle.readlines() if line.strip()]
-        return lines[-max_lines:]
+            for line in handle:
+                if line.strip():
+                    tail.append(line.rstrip())
+        return list(tail)
     except Exception:  # noqa: BLE001
         return []
 
@@ -62,11 +66,14 @@ def _healthcheck(url: str) -> tuple[bool, str]:
             except json.JSONDecodeError:
                 parsed = None
             if isinstance(parsed, dict):
-                if str(parsed.get("status", "")).lower() == "ok":
+                status_value = str(parsed.get("status", "")).strip().lower()
+                if status_value == "ok":
                     return True, "status=ok"
-            if "ok" in body.lower():
-                return True, "body_contains_ok"
-            return True, "http_200"
+                return False, f"status={status_value or 'missing'}"
+            compact_body = "".join(body.lower().split())
+            if '"status":"ok"' in compact_body:
+                return True, "status_token_ok"
+            return False, "http_200_without_ok_status"
     except urllib.error.URLError as exc:
         return False, str(exc)
     except Exception as exc:  # noqa: BLE001
