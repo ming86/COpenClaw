@@ -74,7 +74,15 @@ def serve(
                 log_dir=settings.log_dir,
                 timeout=settings.copilot_cli_timeout,
             )
-        uvicorn.run("copenclaw.core.gateway:create_app", host=host, port=port, reload=reload, factory=True)
+        access_log = _env_true("copenclaw_HTTP_ACCESS_LOG", default=(os.name != "nt"))
+        uvicorn.run(
+            "copenclaw.core.gateway:create_app",
+            host=host,
+            port=port,
+            reload=reload,
+            factory=True,
+            access_log=access_log,
+        )
 
     try:
         _run_once()

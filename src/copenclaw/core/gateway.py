@@ -3,6 +3,8 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import glob
+import hashlib
+import json
 import logging
 from typing import Any, Optional
 import os
@@ -687,6 +689,9 @@ def create_app() -> FastAPI:
     )
 
     stop_event = threading.Event()
+    terminal_enabled = bool(settings.terminal_ui_enabled and sys.stdin.isatty() and sys.stdout.isatty())
+    terminal_sender_id = settings.terminal_sender_id or "terminal-local"
+    terminal_chat_id = "terminal-console"
 
     # ---- shared helpers ----
 
@@ -890,6 +895,77 @@ def create_app() -> FastAPI:
                 logger.error("Scheduler loop error: %s", exc)
             time.sleep(1.0)
 
+    def _propose_previous_run_error_task() -> None:
+        log_path = os.path.join(settings.log_dir, "copenclaw.log")
+        if not os.path.isfile(log_path):
+            return
+
+        lines = _tail_lines(log_path, max_lines=800)
+        error_lines = [line for line in lines if " ERROR:" in line or "Traceback (most recent call last):" in line]
+        if not error_lines:
+            return
+
+        snippets = error_lines[-8:]
+        digest = hashlib.sha256("\n".join(snippets).encode("utf-8")).hexdigest()
+        marker_path = os.path.join(settings.data_dir, "startup-error-proposal.json")
+        try:
+            if os.path.isfile(marker_path):
+                with open(marker_path, "r", encoding="utf-8") as handle:
+                    marker = json.load(handle)
+                if isinstance(marker, dict) and marker.get("digest") == digest:
+                    return
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to read startup error proposal marker", exc_info=True)
+
+        channel = ""
+        target = ""
+        if settings.telegram_bot_token and settings.telegram_owner_chat_id:
+            channel = "telegram"
+            target = settings.telegram_owner_chat_id
+        elif terminal_enabled:
+            channel = "terminal"
+            target = terminal_chat_id
+        else:
+            return
+
+        excerpt = "\n".join(f"- {line[:220]}" for line in snippets)
+        prompt = (
+            "Investigate and fix errors detected in the previous COpenClaw run. "
+            "Inspect logs, identify root cause(s), apply minimal safe fixes, and run relevant tests.\n\n"
+            f"Workspace log directory: {settings.log_dir}\n"
+            "Primary log file: copenclaw.log\n\n"
+            "Recent error lines:\n"
+            f"{excerpt}\n\n"
+            "When complete, summarize what failed, what changed, and validation results."
+        )
+        task = task_manager.create_task(
+            name="Investigate previous-run errors",
+            prompt=prompt,
+            channel=channel,
+            target=target,
+            service_url="",
+            auto_supervise=True,
+            status="proposed",
+        )
+
+        proposal_msg = (
+            "⚠️ I found error(s) from the previous run.\n\n"
+            f"📋 Proposed task: {task.name}\n"
+            f"🆔 {task.task_id}\n\n"
+            "Reply **yes** to approve or **no** to reject.\n\n"
+            f"Recent errors:\n{excerpt}"
+        )
+        if channel == "telegram" and settings.telegram_bot_token:
+            _telegram_adapter().send_message(chat_id=int(target), text=proposal_msg)
+        elif channel == "terminal":
+            _terminal_emit_block("Startup issue detected", proposal_msg, emoji="⚠️")
+
+        try:
+            with open(marker_path, "w", encoding="utf-8") as handle:
+                json.dump({"digest": digest, "task_id": task.task_id, "updated_at": datetime.now(timezone.utc).isoformat()}, handle)
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to write startup error proposal marker", exc_info=True)
+
     # ---- brain bootstrap ----
 
     def _bootstrap_brain() -> None:
@@ -988,10 +1064,45 @@ def create_app() -> FastAPI:
 
         # Detect stale in-progress tasks from previous run and notify the user
         _notify_stale_tasks(settings, task_manager)
+        _propose_previous_run_error_task()
 
     # ---- Telegram polling handler ----
 
     tg_adapter: TelegramAdapter | None = None
+    terminal_thread: threading.Thread | None = None
+    _terminal_io_lock = threading.Lock()
+
+    def _terminal_width() -> int:
+        try:
+            width = shutil.get_terminal_size((120, 30)).columns
+        except OSError:
+            width = 120
+        return max(80, min(140, int(width)))
+
+    def _terminal_emit_block(title: str, body: str, *, emoji: str = "🤖") -> None:
+        if not terminal_enabled:
+            return
+        divider = "─" * _terminal_width()
+        lines = [line for line in (body or "").splitlines()] or [""]
+        with _terminal_io_lock:
+            print(f"\n{divider}", flush=True)
+            print(f"{emoji} {title}", flush=True)
+            print(divider, flush=True)
+            for line in lines:
+                print(line, flush=True)
+            print(divider, flush=True)
+
+    def _terminal_status_line() -> str:
+        tasks = task_manager.list_tasks()
+        running = len([t for t in tasks if t.status in ("running", "paused", "needs_input", "pending")])
+        proposed = len([t for t in tasks if t.status == "proposed"])
+        completed = len([t for t in tasks if t.status == "completed"])
+        failed = len([t for t in tasks if t.status == "failed"])
+        brain = "🟢 ready" if cli._initialized else "🟡 starting"
+        return (
+            f"📊 Tasks running:{running} proposed:{proposed} done:{completed} failed:{failed} | "
+            f"🧠 Brain:{brain} | 👷 Active workers:{worker_pool.active_count()}"
+        )
 
     # ---- Telegram message dedup ----
     _tg_seen_msgs: set[int] = set()
@@ -1055,6 +1166,8 @@ def create_app() -> FastAPI:
                     bot_token=settings.slack_bot_token,
                     signing_secret=settings.slack_signing_secret or "",
                 ).send_message(channel=target, text=text)
+            elif channel == "terminal":
+                _terminal_emit_block("Auto-repair", text, emoji="🛠️")
         except Exception as exc:  # noqa: BLE001
             logger.error("Repair notification failed (%s): %s", channel, exc)
 
@@ -1138,6 +1251,67 @@ def create_app() -> FastAPI:
         threading.Thread(target=_runner, daemon=True, name="runtime-auto-repair").start()
         return True
 
+    def _terminal_loop() -> None:
+        if not terminal_enabled:
+            return
+        divider = "═" * _terminal_width()
+        with _terminal_io_lock:
+            print(divider, flush=True)
+            print("🦀 COpenClaw Terminal Console", flush=True)
+            print("Type a message or slash command. Ctrl+C exits, /restart restarts the app.", flush=True)
+            print(divider, flush=True)
+
+        while not stop_event.is_set():
+            try:
+                with _terminal_io_lock:
+                    print(f"\n{_terminal_status_line()}", flush=True)
+                    print("💬 You > ", end="", flush=True)
+                text = input().strip()
+            except EOFError:
+                break
+            except KeyboardInterrupt:
+                with _terminal_io_lock:
+                    print("\n👋 Exiting terminal console input.", flush=True)
+                break
+
+            if not text:
+                continue
+            if len(text) > 4000:
+                _terminal_emit_block("Input rejected", "Message too long (max 4000 chars).", emoji="⚠️")
+                continue
+
+            chat_req = ChatRequest(
+                channel="terminal",
+                sender_id=terminal_sender_id,
+                chat_id=terminal_chat_id,
+                text=text,
+            )
+            try:
+                resp = handle_chat(
+                    chat_req,
+                    pairing=pairing,
+                    sessions=sessions,
+                    cli=cli,
+                    allow_from=[terminal_sender_id],
+                    data_dir=settings.data_dir,
+                    owner_id=terminal_sender_id,
+                    task_manager=task_manager,
+                    scheduler=scheduler,
+                    worker_pool=worker_pool,
+                    on_task_approved=_on_task_approved,
+                    on_task_cancelled=_on_task_cancelled,
+                    on_task_retry_approved=_on_task_retry_approved,
+                    on_task_retry_rejected=_on_task_retry_rejected,
+                    on_restart=_restart_app,
+                    on_repair=_on_repair,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Terminal chat handling failed: %s", exc)
+                _terminal_emit_block("Runtime error", "An internal error occurred. Run /repair to start diagnostics.", emoji="⚠️")
+                continue
+
+            _terminal_emit_block("Assistant", resp.text, emoji="🤖")
+
     def _handle_telegram_update(update: dict) -> None:
         """Process a single Telegram update from polling (same logic as webhook)."""
         if not isinstance(update, dict):
@@ -1217,24 +1391,20 @@ def create_app() -> FastAPI:
                 on_task_retry_rejected=_on_task_retry_rejected,
                 on_restart=_restart_app,
                 on_repair=_on_repair,
-                on_runtime_error=lambda description, chat_request: _trigger_auto_repair(description, chat_request),
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Telegram poll chat handling failed: %s", exc)
-            _trigger_auto_repair(f"Telegram polling chat failure: {exc}", chat_req)
-            tg.send_message(chat_id=chat_id, text="⚠️ Runtime error detected. Automatic self-repair started.")
+            tg.send_message(chat_id=chat_id, text="⚠️ Runtime error detected. Send /repair to run diagnostics.")
             return
         finally:
             typing_stop.set()
-        if resp.text.lower().startswith("error:"):
-            _trigger_auto_repair(f"Telegram orchestrator response error: {resp.text}", chat_req)
         tg.send_message(chat_id=chat_id, text=resp.text)
 
     # ---- lifespan ----
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
-        nonlocal tg_adapter, signal_adapter
+        nonlocal tg_adapter, terminal_thread, signal_adapter
 
         # Start scheduler thread
         sched_thread = threading.Thread(target=_scheduler_loop, daemon=True)
@@ -1243,6 +1413,11 @@ def create_app() -> FastAPI:
         # Start watchdog thread for stuck tasks
         watchdog_thread = threading.Thread(target=_watchdog_loop, daemon=True, name="task-watchdog")
         watchdog_thread.start()
+
+        if terminal_enabled:
+            terminal_thread = threading.Thread(target=_terminal_loop, daemon=True, name="terminal-console")
+            terminal_thread.start()
+            logger.info("Terminal console UI started")
 
         # Start Telegram polling if configured
         if settings.telegram_bot_token:
@@ -1421,17 +1596,13 @@ def create_app() -> FastAPI:
                 on_task_retry_rejected=_on_task_retry_rejected,
                 on_restart=_restart_app,
                 on_repair=_on_repair,
-                on_runtime_error=lambda description, chat_request: _trigger_auto_repair(description, chat_request),
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Telegram webhook chat handling failed: %s", exc)
-            _trigger_auto_repair(f"Telegram webhook chat failure: {exc}", chat_req)
-            _telegram_adapter().send_message(chat_id=chat_id, text="⚠️ Runtime error detected. Automatic self-repair started.")
+            _telegram_adapter().send_message(chat_id=chat_id, text="⚠️ Runtime error detected. Send /repair to run diagnostics.")
             return {"status": "error"}
         finally:
             typing_stop.set()
-        if resp.text.lower().startswith("error:"):
-            _trigger_auto_repair(f"Telegram orchestrator response error: {resp.text}", chat_req)
         tg.send_message(chat_id=chat_id, text=resp.text)
         return {"status": resp.status}
 
@@ -1500,7 +1671,6 @@ def create_app() -> FastAPI:
             on_task_retry_rejected=_on_task_retry_rejected,
             on_restart=_restart_app,
             on_repair=_on_repair,
-            on_runtime_error=lambda description, chat_request: _trigger_auto_repair(description, chat_request),
         )
         _teams_adapter().send_message(
             service_url=service_url,
@@ -1588,7 +1758,6 @@ def create_app() -> FastAPI:
                 on_task_retry_rejected=_on_task_retry_rejected,
                 on_restart=_restart_app,
                 on_repair=_on_repair,
-                on_runtime_error=lambda description, chat_request: _trigger_auto_repair(description, chat_request),
             )
             adapter.send_message(to=sender, text=resp.text)
 
@@ -1643,7 +1812,6 @@ def create_app() -> FastAPI:
             on_task_retry_rejected=_on_task_retry_rejected,
             on_restart=_restart_app,
             on_repair=_on_repair,
-            on_runtime_error=lambda description, chat_request: _trigger_auto_repair(description, chat_request),
         )
         sig.send_message(recipient=sender, text=resp.text)
 
@@ -1720,7 +1888,6 @@ def create_app() -> FastAPI:
             on_task_retry_rejected=_on_task_retry_rejected,
             on_restart=_restart_app,
             on_repair=_on_repair,
-            on_runtime_error=lambda description, chat_request: _trigger_auto_repair(description, chat_request),
         )
         _slack_adapter().send_message(channel=channel_id, text=resp.text)
         return {"status": resp.status}

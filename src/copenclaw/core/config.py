@@ -43,19 +43,23 @@ class Settings:
     port: int
     backup_max_snapshots: int
     clear_logs_on_launch: bool
+    terminal_ui_enabled: bool
+    terminal_sender_id: str
 
     @staticmethod
     def from_env() -> "Settings":
         default_workspace = str(Path(os.path.expanduser("~")) / ".copenclaw")
         default_log_dir = str(Path(default_workspace) / ".logs")
         default_data_dir = str(Path(default_workspace) / ".data")
+        default_log_level = "warning" if os.name == "nt" else "info"
+        default_terminal_ui = "true" if os.name == "nt" else "false"
         telegram_allow = os.getenv("TELEGRAM_ALLOW_FROM", "")
         msteams_allow = os.getenv("MSTEAMS_ALLOW_FROM", "")
         whatsapp_allow = os.getenv("WHATSAPP_ALLOW_FROM", "")
         signal_allow = os.getenv("SIGNAL_ALLOW_FROM", "")
         slack_allow = os.getenv("SLACK_ALLOW_FROM", "")
         return Settings(
-            log_level=os.getenv("copenclaw_LOG_LEVEL", "info"),
+            log_level=os.getenv("copenclaw_LOG_LEVEL", default_log_level),
             log_dir=os.getenv("copenclaw_LOG_DIR") or default_log_dir,
             data_dir=os.getenv("copenclaw_DATA_DIR") or default_data_dir,
             workspace_dir=os.getenv("copenclaw_WORKSPACE_DIR") or default_workspace,
@@ -92,4 +96,6 @@ class Settings:
             port=int(os.getenv("copenclaw_PORT", "18790")),
             backup_max_snapshots=int(os.getenv("copenclaw_BACKUP_MAX_SNAPSHOTS", "30")),
             clear_logs_on_launch=os.getenv("copenclaw_CLEAR_LOGS_ON_LAUNCH", "false").lower() in {"1", "true", "yes"},
+            terminal_ui_enabled=os.getenv("copenclaw_TERMINAL_UI", default_terminal_ui).lower() in {"1", "true", "yes"},
+            terminal_sender_id=os.getenv("copenclaw_TERMINAL_SENDER_ID", "terminal-local"),
         )

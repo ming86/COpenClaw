@@ -402,6 +402,22 @@ def handle_chat(
         "After responding, STOP — do not loop or idle.]"
     )
 
+    had_resume = bool(copilot_sid or cli.resume_session_id)
+
+    def _retry_without_resume(reason: str) -> str:
+        logger.warning("Copilot CLI %s for %s; retrying without resume", reason, session_key)
+        if copilot_sid:
+            sessions.clear_copilot_session_id(session_key)
+        cli.resume_session_id = None
+        try:
+            return cli.run_prompt(
+                prompt_with_reminder,
+                resume_id=None,
+                on_line=_should_stop_after_proposal_line,
+            )
+        except CopilotCliError as retry_exc:
+            return f"Error: {retry_exc}"
+
     try:
         output = cli.run_prompt(
             prompt_with_reminder,
@@ -411,22 +427,15 @@ def handle_chat(
     except CopilotCliError as exc:
         # If a previously stored resume session is stale (for example after a
         # crashed Copilot CLI process), clear it and retry once without resume.
-        had_resume = bool(copilot_sid or cli.resume_session_id)
         if had_resume:
-            logger.warning("Copilot CLI resume failed for %s; retrying without resume: %s", session_key, exc)
-            if copilot_sid:
-                sessions.clear_copilot_session_id(session_key)
-            cli.resume_session_id = None
-            try:
-                output = cli.run_prompt(
-                    prompt_with_reminder,
-                    resume_id=None,
-                    on_line=_should_stop_after_proposal_line,
-                )
-            except CopilotCliError as retry_exc:
-                output = f"Error: {retry_exc}"
+            output = _retry_without_resume(f"resume failed: {exc}")
         else:
             output = f"Error: {exc}"
+
+    # Copilot CLI can occasionally return a blank response when resuming a stale
+    # session; retry once without resume before surfacing runtime-repair fallback.
+    if not output.strip() and had_resume:
+        output = _retry_without_resume("resume returned an empty response")
 
     def _report_runtime_error(description: str) -> None:
         if not on_runtime_error:

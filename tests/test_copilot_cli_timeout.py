@@ -221,3 +221,17 @@ def test_run_prompt_cli_does_not_disable_autopilot(tmp_path) -> None:
     assert "autopilot" in output.lower()
     assert cli.autopilot is True
     assert popen.call_count == 1
+
+
+def test_run_prompt_api_fallback_warning_logged_once(tmp_path) -> None:
+    cli = CopilotCli(timeout=0, workspace_dir=str(tmp_path), execution_backend="api", allow_cli_fallback=True)
+    with (
+        patch.object(cli, "_run_prompt_api", side_effect=CopilotCliError("api down")),
+        patch.object(cli, "_run_prompt_cli", return_value="fallback ok"),
+        patch("copenclaw.integrations.copilot_cli.logger.warning") as warning_log,
+    ):
+        first = cli.run_prompt("prompt one")
+        second = cli.run_prompt("prompt two")
+    assert first == "fallback ok"
+    assert second == "fallback ok"
+    assert warning_log.call_count == 1

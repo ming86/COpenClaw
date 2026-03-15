@@ -190,6 +190,8 @@ class CopilotCli:
         self._initialized = False
         self._version_logged = False
         self._cached_version: Optional[str] = None
+        self._api_fallback_warned = False
+        self._api_subprocess_fallback_warned = False
 
     @property
     def session_id(self) -> Optional[str]:
@@ -311,9 +313,11 @@ class CopilotCli:
                 raise CopilotCliError(
                     "Copilot API backend selected, but subprocess launch requires explicit CLI fallback"
                 )
-            logger.warning(
-                "Copilot API backend selected; using explicit CLI fallback for subprocess launch"
-            )
+            if not self._api_subprocess_fallback_warned:
+                logger.warning(
+                    "Copilot API backend selected; using explicit CLI fallback for subprocess launch"
+                )
+                self._api_subprocess_fallback_warned = True
         return self._base_cmd(resume_id=resume_id)
 
     @staticmethod
@@ -823,7 +827,11 @@ class CopilotCli:
             except CopilotCliError as api_exc:
                 if not self.allow_cli_fallback:
                     raise
-                logger.warning("Copilot API backend failed; using explicit CLI fallback: %s", api_exc)
+                if not self._api_fallback_warned:
+                    logger.warning("Copilot API backend failed; using explicit CLI fallback: %s", api_exc)
+                    self._api_fallback_warned = True
+                else:
+                    logger.debug("Copilot API backend failed again; continuing CLI fallback")
         return self._run_prompt_cli(
             prompt,
             model=model,
