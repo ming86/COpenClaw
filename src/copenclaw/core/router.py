@@ -29,6 +29,9 @@ logger = logging.getLogger("copenclaw.router")
 # Patterns that indicate approval or rejection
 APPROVE_PATTERNS = re.compile(r"^(yes|approve|go|👍|yep|yeah|do it|ok|confirmed?)$", re.IGNORECASE)
 REJECT_PATTERNS = re.compile(r"^(no|reject|cancel|👎|nope|nah|don'?t|stop)$", re.IGNORECASE)
+PROPOSAL_APPROVE_PATTERN = re.compile(r"^yes[.!]?$", re.IGNORECASE)
+PROPOSAL_REJECT_PATTERN = re.compile(r"^no[.!]?$", re.IGNORECASE)
+INTERNAL_APPROVAL_SENDER_PATTERN = re.compile(r"^(system|worker|supervisor|orchestrator)(?:[-_:].*)?$", re.IGNORECASE)
 PING_BACK_RE = re.compile(r"^ping(?:\s+back)?\s+in\s+(\d+)\s*(?:s|sec|secs|second|seconds)$", re.IGNORECASE)
 PROPOSAL_CONFIRM_RE = re.compile(r"reply\s+yes\s+to\s+approve\s+or\s+no\s+to\s+reject", re.IGNORECASE)
 
@@ -36,6 +39,11 @@ PROPOSAL_CONFIRM_RE = re.compile(r"reply\s+yes\s+to\s+approve\s+or\s+no\s+to\s+r
 def _should_stop_after_proposal_line(line: str) -> bool:
     """Return True when streamed orchestrator output already contains approval prompt."""
     return bool(PROPOSAL_CONFIRM_RE.search(line))
+
+
+def _is_internal_approval_sender(sender_id: str) -> bool:
+    """Best-effort guard to block non-user/system sender IDs from approving proposals."""
+    return bool(INTERNAL_APPROVAL_SENDER_PATTERN.match(str(sender_id or "").strip()))
 
 @dataclass
 class ChatRequest:
@@ -65,7 +73,7 @@ def handle_chat(
     task_manager: Optional[TaskManager] = None,
     scheduler: Optional[Scheduler] = None,
     worker_pool: Optional[WorkerPool] = None,
-    on_task_approved: Optional[object] = None,  # callable(task_id) -> dict
+    on_task_approved: Optional[object] = None,  # callable(task_id, approval_token="") -> dict
     on_task_cancelled: Optional[object] = None,  # callable(task_id) -> None
     on_task_retry_approved: Optional[object] = None,  # callable(task_id) -> dict
     on_task_retry_rejected: Optional[object] = None,  # callable(task_id) -> None
@@ -353,13 +361,26 @@ def handle_chat(
     if task_manager:
         proposed = task_manager.latest_proposed(channel=req.channel, target=req.chat_id)
         if proposed:
-            if APPROVE_PATTERNS.match(text):
+            if PROPOSAL_APPROVE_PATTERN.match(text):
+                if _is_internal_approval_sender(req.sender_id):
+                    return ChatResponse(
+                        text="⚠️ Proposal approval requires a direct user reply of Yes.",
+                        status="denied",
+                    )
+                approval_token = task_manager.ensure_proposal_approval_token(proposed.task_id)
+                if not approval_token:
+                    return ChatResponse(
+                        text=(
+                            "❌ Could not verify proposal approval state.\n"
+                            "Please re-run the proposal and try approving again."
+                        )
+                    )
                 log_event(data_dir, f"{req.channel}.task.approved", {
                     "task_id": proposed.task_id, "name": proposed.name,
                 }, request_id=rid)
                 if on_task_approved:
                     try:
-                        on_task_approved(proposed.task_id)
+                        on_task_approved(proposed.task_id, approval_token=approval_token)
                         return ChatResponse(text=f"✅ Approved! Task \"{proposed.name}\" is starting.")
                     except Exception as exc:  # noqa: BLE001
                         return ChatResponse(text=f"❌ Failed to start task: {exc}")
@@ -367,7 +388,12 @@ def handle_chat(
                     task_manager.update_status(proposed.task_id, "pending")
                     return ChatResponse(text=f"✅ Approved \"{proposed.name}\" — but no worker pool available to start it.")
 
-            if REJECT_PATTERNS.match(text):
+            if PROPOSAL_REJECT_PATTERN.match(text):
+                if _is_internal_approval_sender(req.sender_id):
+                    return ChatResponse(
+                        text="⚠️ Proposal rejection requires a direct user reply of No.",
+                        status="denied",
+                    )
                 task_manager.cancel_task(proposed.task_id)
                 log_event(data_dir, f"{req.channel}.task.rejected", {
                     "task_id": proposed.task_id, "name": proposed.name,

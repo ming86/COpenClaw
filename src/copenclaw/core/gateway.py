@@ -993,9 +993,12 @@ def create_app() -> FastAPI:
 
     # ---- task approval callback ----
 
-    def _on_task_approved(task_id: str) -> dict:
+    def _on_task_approved(task_id: str, approval_token: str = "") -> dict:
         """Called when the user approves a proposed task via chat."""
-        return mcp_handler._tool_tasks_approve({"task_id": task_id})
+        args = {"task_id": task_id}
+        if approval_token:
+            args["_approval_token"] = approval_token
+        return mcp_handler._tool_tasks_approve(args)
 
     def _on_task_cancelled(task_id: str) -> None:
         """Called when the user cancels a task via /cancel slash command."""
