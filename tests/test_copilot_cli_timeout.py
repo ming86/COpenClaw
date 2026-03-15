@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import sys
 import time
 from unittest.mock import patch
@@ -127,5 +128,97 @@ def test_resolve_executable_keeps_wrapper_path() -> None:
         side_effect=[r"C:\Tools\copilot.cmd", r"C:\Tools\copilot.exe"],
     ) as mock_which:
         resolved = cli._resolve_executable()
-    assert resolved == r"C:\Tools\copilot.cmd"
+    assert resolved == os.path.normcase(r"C:\Tools\copilot.cmd")
     assert mock_which.call_count == 1
+
+
+def test_run_prompt_cli_no_warnings_retry_drops_resume_session(tmp_path) -> None:
+    cli = CopilotCli(timeout=0, workspace_dir=str(tmp_path), resume_session_id="resume-123")
+    cli._version_logged = True
+    launches: list[list[str]] = []
+
+    def _fake_popen(cmd, **kwargs):  # noqa: ANN001
+        launches.append(cmd)
+        if len(launches) == 1:
+            return StubProcess(["error: unknown option '--no-warnings'"], exit_code=1)
+        if len(launches) == 2:
+            return StubProcess(["error: unknown option '--no-warnings'"], exit_code=1)
+        return StubProcess(["recovered"], exit_code=0)
+
+    with (
+        patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot"),
+        patch("copenclaw.integrations.copilot_cli.subprocess.Popen", side_effect=_fake_popen),
+    ):
+        output = cli._run_prompt_cli(
+            prompt="ignored",
+            model=None,
+            cwd=str(tmp_path),
+            log_prefix="TEST",
+            resume_id=None,
+            allow_retry=True,
+            autopilot=None,
+            on_line=None,
+        )
+
+    assert output == "recovered"
+    assert len(launches) == 3
+    assert "--resume" in launches[0]
+    assert "--resume" in launches[1]
+    assert "--resume" not in launches[2]
+    assert cli.resume_session_id is None
+
+
+def test_run_prompt_cli_no_warnings_retry_even_when_exit_code_zero(tmp_path) -> None:
+    cli = CopilotCli(timeout=0, workspace_dir=str(tmp_path), resume_session_id="resume-123")
+    cli._version_logged = True
+    launches: list[list[str]] = []
+
+    def _fake_popen(cmd, **kwargs):  # noqa: ANN001
+        launches.append(cmd)
+        if len(launches) == 1:
+            return StubProcess(["error: unknown option '--no-warnings'"], exit_code=0)
+        return StubProcess(["recovered"], exit_code=0)
+
+    with (
+        patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot"),
+        patch("copenclaw.integrations.copilot_cli.subprocess.Popen", side_effect=_fake_popen),
+    ):
+        output = cli._run_prompt_cli(
+            prompt="ignored",
+            model=None,
+            cwd=str(tmp_path),
+            log_prefix="TEST",
+            resume_id=None,
+            allow_retry=True,
+            autopilot=None,
+            on_line=None,
+        )
+
+    assert output == "recovered"
+    assert len(launches) == 2
+
+
+def test_run_prompt_cli_does_not_disable_autopilot(tmp_path) -> None:
+    cli = CopilotCli(timeout=0, workspace_dir=str(tmp_path))
+    cli._version_logged = True
+    cli._subcommand = "chat"
+    process = StubProcess(["error: unknown option '--autopilot'"], exit_code=1)
+
+    with (
+        patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot"),
+        patch("copenclaw.integrations.copilot_cli.subprocess.Popen", return_value=process) as popen,
+    ):
+        output = cli._run_prompt_cli(
+            prompt="ignored",
+            model=None,
+            cwd=str(tmp_path),
+            log_prefix="TEST",
+            resume_id=None,
+            allow_retry=True,
+            autopilot=None,
+            on_line=None,
+        )
+
+    assert "autopilot" in output.lower()
+    assert cli.autopilot is True
+    assert popen.call_count == 1

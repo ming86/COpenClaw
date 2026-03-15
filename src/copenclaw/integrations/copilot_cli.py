@@ -209,6 +209,8 @@ class CopilotCli:
         path = shutil.which(self.executable)
         if not path:
             raise CopilotCliError("copilot CLI not found on PATH")
+        if sys.platform == "win32":
+            return os.path.normcase(path)
         return path
 
     @staticmethod
@@ -349,9 +351,7 @@ class CopilotCli:
         lowered = output.lower()
         if not cls._is_no_warnings_unknown_option(lowered):
             return False
-        if burst_detected:
-            return True
-        return lowered.count("unknown option '--no-warnings'") + lowered.count('unknown option "--no-warnings"') >= 2
+        return True
 
     @staticmethod
     def _sanitize_cmd_for_log(cmd: list[str]) -> list[str]:
@@ -704,8 +704,8 @@ class CopilotCli:
         output = "".join(output_lines).strip()
         if timed_out:
             raise CopilotCliError(f"copilot CLI timed out after {self.timeout}s")
-        if process.returncode != 0 and (not early_stopped or burst_detected):
-            if allow_retry and self._silent_mode and self._should_retry_without_silent(output):
+        if allow_retry and self._is_no_warnings_unknown_option(output):
+            if self._silent_mode:
                 logger.warning("copilot CLI rejected silent mode; retrying without '-s'")
                 self._silent_mode = False
                 return self._run_prompt_cli(
@@ -714,25 +714,27 @@ class CopilotCli:
                     cwd=cwd,
                     log_prefix=log_prefix,
                     resume_id=resume_id,
-                    allow_retry=False,
+                    allow_retry=True,
                     autopilot=autopilot,
                     on_line=on_line,
                 )
-            if allow_retry and self._should_retry_with_clean_session(output, burst_detected=burst_detected):
-                logger.warning(
-                    "%s | Retrying with clean session after '--no-warnings' unknown-option failure",
-                    log_prefix,
-                )
-                return self._run_prompt_cli(
-                    prompt,
-                    model=model,
-                    cwd=cwd,
-                    log_prefix=log_prefix,
-                    resume_id=None,
-                    allow_retry=False,
-                    autopilot=autopilot,
-                    on_line=on_line,
-                )
+            logger.warning(
+                "%s | Retrying with clean session after '--no-warnings' unknown-option failure",
+                log_prefix,
+            )
+            self._resume_session_id = None
+            self._session_id = None
+            return self._run_prompt_cli(
+                prompt,
+                model=model,
+                cwd=cwd,
+                log_prefix=log_prefix,
+                resume_id=None,
+                allow_retry=False,
+                autopilot=autopilot,
+                on_line=on_line,
+            )
+        if process.returncode != 0 and (not early_stopped or burst_detected):
             if allow_retry and not self._subcommand and self._should_retry_with_chat(output):
                 logger.warning("copilot CLI rejected args; retrying with 'chat' subcommand")
                 self._subcommand = "chat"
@@ -744,20 +746,6 @@ class CopilotCli:
                     resume_id=resume_id,
                     allow_retry=False,
                     autopilot=autopilot,
-                    on_line=on_line,
-                )
-            effective_autopilot = self.autopilot if autopilot is None else autopilot
-            if allow_retry and effective_autopilot and self._should_retry_without_autopilot(output):
-                logger.warning("copilot CLI rejected --autopilot; retrying without it")
-                self.autopilot = False
-                return self._run_prompt_cli(
-                    prompt,
-                    model=model,
-                    cwd=cwd,
-                    log_prefix=log_prefix,
-                    resume_id=resume_id,
-                    allow_retry=False,
-                    autopilot=False,
                     on_line=on_line,
                 )
             if not output:
