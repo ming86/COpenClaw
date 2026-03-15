@@ -96,7 +96,7 @@ class TimelineEntry:
 
 # Valid task statuses
 TASK_STATUSES = {"proposed", "pending", "running", "paused", "needs_input", "completed", "failed", "cancelled"}
-TASK_TYPES = {"standard", "continuous_improvement", "continuous_task"}
+TASK_TYPES = {"standard", "continuous_improvement"}
 
 _CI_DEFAULT_CONFIG: dict[str, Any] = {
     "objective": "",
@@ -166,7 +166,7 @@ class Task:
     name: str
     prompt: str
     status: str = "pending"             # proposed|pending|running|paused|needs_input|completed|failed|cancelled
-    task_type: str = "standard"         # standard|continuous_improvement|continuous_task
+    task_type: str = "standard"         # standard|continuous_improvement
 
     created_at: datetime = field(default_factory=_now)
     updated_at: datetime = field(default_factory=_now)

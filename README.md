@@ -561,8 +561,6 @@ Or add to `~/.copilot/mcp-config.json`:
 
 For `task_type="continuous_improvement"`, terminal iterations auto-chain by default: COpenClaw creates and dispatches the next iteration with mission handoff context and a rotated focus direction (`ux`, `reliability`, `performance`, `quality`, `safety`, `observability`, `docs`). Use continuous config keys `auto_chain_enabled`, `auto_chain_max_generations`, `auto_chain_failure_limit`, and `auto_chain_failure_backoff_seconds` to tune guardrails.
 
-For general continuous planning loops, use `tasks_propose`/`tasks_create` with `continuous_task=true` (or `task_type="continuous_task"`). This generates a strong post-completion hook prompt (optionally shaped by `continuous_prompt`) that reviews outcomes, researches next opportunities, models user scenarios, and auto-dispatches the next follow-up task.
-
 ### Task ITC tools (worker/supervisor)
 
 | Tool | Description |

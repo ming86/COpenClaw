@@ -37,7 +37,6 @@ from copenclaw.core.policy import ExecutionPolicy, load_execution_policy
 from copenclaw.core.scheduler import Scheduler
 from copenclaw.core.task_events import TaskEventRegistry
 from copenclaw.core.tasks import TaskManager, _now
-from copenclaw.core.templates import continuous_task_template
 from copenclaw.core.worker import WorkerPool
 from copenclaw.integrations.telegram import TelegramAdapter
 from copenclaw.integrations.teams import TeamsAdapter
@@ -58,10 +57,6 @@ _CI_DIRECTION_GUIDANCE = {
     "observability": "Improve logs, metrics, and diagnosis signals for faster debugging.",
     "docs": "Improve operator/developer documentation for maintainability and handoff.",
 }
-_DEFAULT_CONTINUOUS_TASK_GUIDANCE = (
-    "Review the current design deeply, research comparable products and relevant academic/industry references, "
-    "model realistic user scenarios, and select the highest-impact next feature/capability to implement."
-)
 _SUPERVISOR_AUTO_FINALIZE_ASSESSMENT_THRESHOLD = 10
 
 
@@ -203,11 +198,9 @@ TASK_TOOLS = [
                 "service_url": {"type": "string", "description": "Required for Teams"},
                 "check_interval": {"type": "integer", "default": 600, "description": "Supervisor check interval in seconds"},
                 "auto_supervise": {"type": "boolean", "default": True, "description": "Whether to auto-start a supervisor"},
-                "task_type": {"type": "string", "enum": ["standard", "continuous_improvement", "continuous_task"], "default": "standard"},
+                "task_type": {"type": "string", "enum": ["standard", "continuous_improvement"], "default": "standard"},
                 "continuous": {"type": "object", "description": "Continuous improvement configuration when task_type=continuous_improvement"},
                 "on_complete": {"type": "string", "description": "A prompt to feed to the orchestrator when this task finishes (success, failure, or cancellation). Use this for chaining tasks or retrying on failure. The hook prompt includes the terminal reason so the orchestrator can react appropriately."},
-                "continuous_task": {"type": "boolean", "default": False, "description": "When true, auto-builds a continuous-task on_complete hook that researches and dispatches the next follow-up task automatically."},
-                "continuous_prompt": {"type": "string", "description": "Optional user-specific guidance to shape the generated continuous-task hook prompt."},
             },
             "required": ["prompt", "plan"],
         },
@@ -236,11 +229,9 @@ TASK_TOOLS = [
                 "service_url": {"type": "string", "description": "Required for Teams"},
                 "check_interval": {"type": "integer", "default": 600, "description": "Supervisor check interval in seconds"},
                 "auto_supervise": {"type": "boolean", "default": True, "description": "Whether to auto-start a supervisor"},
-                "task_type": {"type": "string", "enum": ["standard", "continuous_improvement", "continuous_task"], "default": "standard"},
+                "task_type": {"type": "string", "enum": ["standard", "continuous_improvement"], "default": "standard"},
                 "continuous": {"type": "object", "description": "Continuous improvement configuration when task_type=continuous_improvement"},
                 "on_complete": {"type": "string", "description": "A prompt to feed to the orchestrator when this task finishes (success, failure, or cancellation)."},
-                "continuous_task": {"type": "boolean", "default": False, "description": "When true, auto-builds a continuous-task on_complete hook that researches and dispatches the next follow-up task automatically."},
-                "continuous_prompt": {"type": "string", "description": "Optional user-specific guidance to shape the generated continuous-task hook prompt."},
             },
             "required": ["prompt"],
         },
@@ -1007,19 +998,11 @@ class MCPProtocolHandler:
             target = self.owner_chat_id
         return channel, target
 
-    def _is_continuous_task_requested(self, args: dict[str, Any]) -> bool:
-        task_type = str(args.get("task_type", "standard")).strip().lower()
-        return bool(args.get("continuous_task")) or task_type == "continuous_task"
-
     def _resolve_task_type(self, args: dict[str, Any]) -> str:
         task_type = str(args.get("task_type", "standard")).strip().lower()
-        if task_type in {"continuous", "continuous_task"}:
-            return "continuous_task"
+        if task_type == "continuous":
+            return "continuous_improvement"
         return task_type or "standard"
-
-    def _build_continuous_task_hook(self, task_prompt: str, user_guidance: str) -> str:
-        guidance = (user_guidance or "").strip() or _DEFAULT_CONTINUOUS_TASK_GUIDANCE
-        return continuous_task_template(task_prompt=task_prompt, user_guidance=guidance)
 
     def _tool_tasks_propose(self, args: dict[str, Any]) -> dict:
         """Create a proposal that the user must approve before workers are spawned."""
@@ -1028,15 +1011,7 @@ class MCPProtocolHandler:
         channel, target = self._resolve_channel_target(args)
         name = args.get("name") or generate_name()
         task_prompt = args["prompt"]
-        continuous_task_enabled = self._is_continuous_task_requested(args)
-        continuous_prompt_text = ""
         on_complete_hook = (args.get("on_complete") or "").strip()
-        if continuous_task_enabled:
-            continuous_prompt_text = self._build_continuous_task_hook(
-                task_prompt=task_prompt,
-                user_guidance=(args.get("continuous_prompt") or on_complete_hook or ""),
-            )
-            on_complete_hook = continuous_prompt_text
 
         # Guard: reject duplicate task names that are still active/proposed
         existing = tm.list_tasks()
@@ -1090,8 +1065,6 @@ class MCPProtocolHandler:
             "plan": task.plan,
             "auto_supervise": task.auto_supervise,
             "task_type": task.task_type,
-            "continuous_task": continuous_task_enabled,
-            "continuous_prompt": continuous_prompt_text,
             "message": "Proposal sent to user. Waiting for approval.",
         }
 
@@ -1116,15 +1089,7 @@ class MCPProtocolHandler:
         channel, target = self._resolve_channel_target(args)
         name = args.get("name") or generate_name()
         task_prompt = args["prompt"]
-        continuous_task_enabled = self._is_continuous_task_requested(args)
-        continuous_prompt_text = ""
         on_complete_hook = (args.get("on_complete") or "").strip()
-        if continuous_task_enabled:
-            continuous_prompt_text = self._build_continuous_task_hook(
-                task_prompt=task_prompt,
-                user_guidance=(args.get("continuous_prompt") or on_complete_hook or ""),
-            )
-            on_complete_hook = continuous_prompt_text
 
         task = tm.create_task(
             name=name,
@@ -1154,11 +1119,7 @@ class MCPProtocolHandler:
                 "task_type": getattr(task, "task_type", "standard"),
             })
 
-        result = self._start_task(task)
-        if continuous_task_enabled:
-            result["continuous_task"] = True
-            result["continuous_prompt"] = continuous_prompt_text
-        return result
+        return self._start_task(task)
 
     def _build_worker_callbacks(self, tm: TaskManager, pool: WorkerPool):
         # Callbacks for worker lifecycle
@@ -2241,7 +2202,7 @@ class MCPProtocolHandler:
         )
         return direction, rationale
 
-    def _maybe_chain_continuous_task(
+    def _maybe_chain_continuous_improvement(
         self,
         task: Any,
         reason: str,
@@ -2453,7 +2414,7 @@ class MCPProtocolHandler:
         chain_info: dict[str, Any] | None = None
         if getattr(task, "task_type", "standard") == "continuous_improvement":
             try:
-                chain_info = self._maybe_chain_continuous_task(task, reason, summary, detail)
+                chain_info = self._maybe_chain_continuous_improvement(task, reason, summary, detail)
             except Exception as exc:  # noqa: BLE001
                 logger.error("Continuous chain generation failed for task %s: %s", task.task_id, exc)
 

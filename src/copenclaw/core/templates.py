@@ -128,8 +128,11 @@ def starter_template(**kwargs: str) -> str:
     return load_template("starter", **kwargs)
 
 
-def continuous_task_template(*, task_prompt: str, user_guidance: str) -> str:
-    """Return rendered continuous-task hook instructions."""
-    return load_template(
-        "continuous_task", task_prompt=task_prompt, user_guidance=user_guidance
-    )
+def worker_launch_prompt(*, task_id: str) -> str:
+    """Return trigger prompt for a fresh worker launch."""
+    return load_template("worker_launch", task_id=task_id)
+
+
+def worker_resume_prompt(*, task_id: str) -> str:
+    """Return trigger prompt for a resumed worker launch."""
+    return load_template("worker_resume", task_id=task_id)

@@ -32,7 +32,6 @@ from copenclaw.core.worker import (
     _write_instructions_file,
 )
 from copenclaw.core.templates import (
-    continuous_task_template,
     worker_template,
     supervisor_template,
 )
@@ -161,17 +160,6 @@ class TestInstructionsFile:
         assert "implementation quality" in result
         assert "meaningful tests" in result
         assert "deep implementation" in result
-
-    def test_continuous_task_template_formats(self):
-        result = continuous_task_template(
-            task_prompt="Build better collaboration flows",
-            user_guidance="Prioritize power-user onboarding and benchmark top competitor apps.",
-        )
-        assert "continuous-task strategy pass" in result
-        assert "Build better collaboration flows" in result
-        assert "power-user onboarding" in result
-        assert "tasks_create" in result
-
 
 # ── Test: WorkerThread lifecycle ─────────────────────────────
 
@@ -775,31 +763,6 @@ class TestE2ETaskFlow:
         logs = self._call_tool(handler, "tasks_logs", {"task_id": task_id})
         assert "Starting work" in logs["logs"]
 
-    def test_tasks_propose_continuous_task_generates_full_prompt(self, tmp_path):
-        data_dir = str(tmp_path / "data")
-        os.makedirs(data_dir)
-        handler = self._make_handler(data_dir)
-
-        result = self._call_tool(
-            handler,
-            "tasks_propose",
-            {
-                "prompt": "Evolve onboarding analytics and feature discovery",
-                "plan": "- Analyze current flow\n- Propose concrete improvements",
-                "task_type": "continuous_task",
-                "continuous_prompt": "Focus on enterprise admins and onboarding friction.",
-            },
-        )
-
-        assert result["status"] == "proposed"
-        assert result["continuous_task"] is True
-        assert "continuous-task strategy pass" in result["continuous_prompt"]
-        assert "enterprise admins" in result["continuous_prompt"]
-        task = handler.task_manager.get(result["task_id"])
-        assert task is not None
-        assert task.task_type == "continuous_task"
-        assert task.on_complete == result["continuous_prompt"]
-
     @patch("copenclaw.core.worker.subprocess.Popen")
     @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")
     @patch("copenclaw.mcp.protocol.TelegramAdapter")
@@ -823,39 +786,6 @@ class TestE2ETaskFlow:
 
         logs = self._call_tool(handler, "tasks_logs", {"task_id": task_id})
         assert "Done!" in logs["logs"]
-
-    @patch("copenclaw.core.worker.subprocess.Popen")
-    @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")
-    @patch("copenclaw.mcp.protocol.TelegramAdapter")
-    def test_tasks_create_continuous_task_sets_generated_hook(
-        self, mock_telegram, mock_which, mock_popen, tmp_path
-    ):
-        data_dir = str(tmp_path / "data")
-        os.makedirs(data_dir)
-        handler = self._make_handler(data_dir)
-        mock_popen.return_value = FakeProcess(["Done!"], exit_code=0)
-
-        result = self._call_tool(
-            handler,
-            "tasks_create",
-            {
-                "prompt": "Improve workflow latency and reliability",
-                "task_type": "continuous_task",
-                "continuous_prompt": "Prioritize memory use and tail latency regressions.",
-                "auto_supervise": False,
-            },
-        )
-
-        assert result["status"] == "running"
-        assert result["continuous_task"] is True
-        assert "tail latency regressions" in result["continuous_prompt"]
-        task = handler.task_manager.get(result["task_id"])
-        assert task is not None
-        assert task.task_type == "continuous_task"
-        assert "continuous-task strategy pass" in task.on_complete
-        worker = handler.worker_pool.get_worker(result["task_id"])
-        assert worker is not None
-        worker._thread.join(timeout=5)
 
     @patch("copenclaw.core.worker.subprocess.Popen")
     @patch("copenclaw.integrations.copilot_cli.shutil.which", return_value="copilot")

@@ -124,8 +124,6 @@ Do not loop, idle, or run follow-up tool calls after you've composed your reply.
    - `plan`: Bullet-point plan
    - `auto_supervise`: true
    - `on_complete`: Special prompt that will execute upon completion (failure, success, timed-out, etc)
-   - optional `continuous_task`: true (to auto-generate a research-driven continuous follow-up loop)
-   - optional `continuous_prompt`: user-specific guidance for that continuous loop
 3. Reply to user with the **full proposal details**. Reply **Yes** to approve.
 
 **User:** "Yes"
@@ -154,14 +152,10 @@ When presenting a proposal to the user, ALWAYS include these details so they can
 
 ((optional **On Completion** section too))
 
-((optional **Continuous Prompt** section when `continuous_task=true`, showing the full generated prompt))
-
 Reply **Yes** to approve or **No** to reject.
 ```
 
 The user needs to see what the worker will actually do and the fixed supervisor quality rubric. Do NOT just say "I've proposed a task" without showing the details.
-
-When the user asks for a continuous task/loop, infer and strengthen their objective into a high-quality `continuous_prompt` and include the full generated continuous prompt in your proposal message.
 
 ## Continuing & Redirecting Tasks
 
@@ -182,8 +176,6 @@ When the user wants to continue, redirect, or update a running or completed task
 ## Task Chaining with `on_complete`
 
 You can set an `on_complete` prompt on any task (via `tasks_propose` or `tasks_create`). When that task reaches **any terminal state** (success, failure, or cancellation), the system automatically feeds the `on_complete` prompt to you (the orchestrator). The hook prompt includes the terminal reason so you can react appropriately — retry on failure, continue on success, or clean up on cancellation. You can then use `tasks_create` to spawn follow-up tasks without requiring user approval — the user pre-authorized this by setting the hook.
-
-`tasks_propose` and `tasks_create` also support `continuous_task=true` with optional `continuous_prompt`. When enabled, the system generates a strong default on-complete prompt that performs deep design review, research, user-scenario modeling, and auto-dispatches the next follow-up task. If the user gives custom intent, put that in `continuous_prompt` so the generated hook reflects it.
 
 **Example — iterative game improvement:**
 ```
