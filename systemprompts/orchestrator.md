@@ -142,7 +142,7 @@ When the user wants to continue, redirect, or update a running or completed task
 
 1. **Use `tasks_list`** to find the relevant task (this includes recently completed tasks)
 2. **Use `tasks_send`** with the task ID:
-   - For **running tasks**: msg_type `instruction` delivers the message to the worker/supervisor inbox
+   - For **running tasks**: msg_type `instruction`/`input`/`redirect` relaunches the worker, resumes its Copilot session, and injects your message into the relaunch prompt
    - For **stopped tasks** (completed/failed/cancelled): msg_type `instruction` or `redirect` will **auto-resume** the task with a new worker, using the message as updated instructions. The previous workspace is preserved.
 
 **Examples:**

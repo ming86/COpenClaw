@@ -14,6 +14,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -273,7 +274,7 @@ TASK_TOOLS = [
     },
     {
         "name": "tasks_send",
-        "description": "Send a message to a task's worker or supervisor. If the task has stopped (completed/failed/cancelled), sending an 'instruction' or 'redirect' will auto-resume it with a new worker using the message as updated instructions. Use this to continue or redirect existing tasks.",
+        "description": "Send a message to a task. For running tasks, instruction/input/redirect trigger a worker relaunch with session resume and injected message context. For stopped tasks, instruction/redirect auto-resume work.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -322,7 +323,7 @@ TASK_TOOLS = [
     },
     {
         "name": "task_check_inbox",
-        "description": "Check for new messages/instructions from the orchestrator or supervisor. Workers should call this periodically.",
+        "description": "Read queued downward messages for this task (legacy compatibility / diagnostics).",
         "inputSchema": {
             "type": "object",
             "properties": {"task_id": {"type": "string"}},
@@ -373,7 +374,7 @@ TASK_TOOLS = [
     },
     {
         "name": "task_send_input",
-        "description": "Send guidance/input from supervisor to worker (adds to worker's inbox).",
+        "description": "Send supervisor guidance to worker and trigger relaunch with the guidance injected into the resume prompt.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -421,6 +422,8 @@ class MCPProtocolHandler:
         # Callback to restart the entire app process.
         # Signature: restart_callback(reason: str) -> None
         self.restart_callback: Any = None
+        self._worker_relaunch_lock = threading.Lock()
+        self._worker_relaunch_requested: set[str] = set()
 
     def handle_request(
         self,
@@ -1154,6 +1157,22 @@ class MCPProtocolHandler:
                     if w.session_id:
                         logger.info("Stored worker session %s on task %s for future resume", w.session_id, task_id)
 
+            if self._consume_worker_relaunch_requested(task_id):
+                if t and t.status not in ("completed", "failed", "cancelled"):
+                    tm.handle_report(
+                        task_id,
+                        "progress",
+                        "Worker session relaunched with updated instructions",
+                        detail="Previous worker session was intentionally stopped to apply new guidance.",
+                        from_tier="orchestrator",
+                    )
+                    t.worker_exited_at = _now()
+                    t.worker_process_observed_at = _now()
+                    t.worker_child_pids = []
+                    t.worker_process_running = False
+                    tm._save()
+                return
+
             if t and t.status not in ("completed", "failed", "cancelled"):
                 if output.startswith("ERROR:") or output.startswith("UNEXPECTED ERROR:"):
                     self._request_retry_approval(task_id, output[:500])
@@ -1165,32 +1184,6 @@ class MCPProtocolHandler:
                     t.worker_child_pids = []
                     t.worker_process_running = False
                     tm._save()
-
-                    # If supervisor is still running but worker exited, check for
-                    # unread inbox messages and re-dispatch if supervisor sent feedback
-                    if t.auto_supervise and pool:
-                        sup = pool.get_supervisor(task_id)
-                        unread = [m for m in t.inbox if not m.acknowledged]
-                        if sup and sup.is_running and unread:
-                            logger.info(
-                                "Worker %s exited but supervisor is active with %d unread messages — re-dispatching",
-                                task_id, len(unread),
-                            )
-                            try:
-                                pool.start_worker(
-                                    task_id=task_id,
-                                    prompt=(
-                                        f"CONTINUATION: You previously worked on this task and exited. "
-                                        f"The supervisor has sent you feedback. Check your inbox with "
-                                        f"task_check_inbox and address any issues. Original task: {t.prompt[:2000]}"
-                                    ),
-                                    working_dir=t.working_dir,
-                                    on_output=on_worker_output,
-                                    on_complete=on_worker_complete,
-                                )
-                                tm.append_log(task_id, "\n--- WORKER RE-DISPATCHED (supervisor feedback pending) ---\n")
-                            except RuntimeError:
-                                logger.warning("Could not re-dispatch worker %s (already running?)", task_id)
 
                     # WATCHDOG: If worker exited and completion was deferred,
                     # schedule a timeout to auto-finalize if supervisor doesn't act
@@ -1253,6 +1246,75 @@ class MCPProtocolHandler:
                         logger.info("Started deferred-completion watchdog for task %s (5 min timeout)", task_id)
 
         return on_worker_output, on_worker_complete
+
+    def _mark_worker_relaunch_requested(self, task_id: str) -> None:
+        with self._worker_relaunch_lock:
+            self._worker_relaunch_requested.add(task_id)
+
+    def _consume_worker_relaunch_requested(self, task_id: str) -> bool:
+        with self._worker_relaunch_lock:
+            if task_id not in self._worker_relaunch_requested:
+                return False
+            self._worker_relaunch_requested.remove(task_id)
+            return True
+
+    def _relaunch_worker_with_message(
+        self,
+        task: Any,
+        *,
+        msg_type: str,
+        content: str,
+        from_tier: str,
+    ) -> bool:
+        pool = self._require_worker_pool()
+        tm = self._require_task_manager()
+        worker = pool.get_worker(task.task_id)
+        resume_session_id = task.worker_session_id
+        worker_running = bool(worker and worker.is_running)
+
+        if worker and worker.session_id:
+            resume_session_id = worker.session_id
+            task.worker_session_id = worker.session_id
+            task.updated_at = _now()
+            tm._save()
+
+        if worker_running:
+            self._mark_worker_relaunch_requested(task.task_id)
+            pool.stop_worker(task.task_id)
+
+        on_worker_output, on_worker_complete = self._build_worker_callbacks(tm, pool)
+        relaunch_prompt = (
+            f"CONTINUATION for task '{task.name}'.\n\n"
+            f"Original task: {task.prompt[:3000]}\n\n"
+            f"Latest message from {from_tier} ({msg_type}):\n{content}\n\n"
+            "Apply this update immediately. Continue from existing workspace state, "
+            "then report progress with task_report."
+        )
+        try:
+            pool.start_worker(
+                task_id=task.task_id,
+                prompt=relaunch_prompt,
+                working_dir=task.working_dir,
+                on_output=on_worker_output,
+                on_complete=on_worker_complete,
+                resume_session_id=resume_session_id,
+            )
+        except RuntimeError as exc:
+            logger.warning("Could not relaunch worker %s after %s: %s", task.task_id, msg_type, exc)
+            return False
+        tm.update_status(task.task_id, "running")
+        tm.append_log(
+            task.task_id,
+            f"\n--- WORKER RELAUNCHED ({from_tier} {msg_type}) ---\n{content[:1000]}\n",
+        )
+        logger.info(
+            "Relaunched worker for task %s using resume session %s after %s %s",
+            task.task_id,
+            resume_session_id or "<none>",
+            from_tier,
+            msg_type,
+        )
+        return True
 
     def _sync_worker_process_state(self, tm: TaskManager, task_id: str) -> dict[str, Any]:
         task = tm.get(task_id)
@@ -1433,6 +1495,7 @@ class MCPProtocolHandler:
             working_dir=task.working_dir,
             on_output=on_worker_output,
             on_complete=on_worker_complete,
+            resume_session_id=task.worker_session_id,
         )
         self._sync_worker_process_state(tm, task.task_id)
 
@@ -1699,7 +1762,25 @@ class MCPProtocolHandler:
             if task:
                 self._cancel_supervisor_job(task)
 
-        return {"status": "sent", "msg_id": msg.msg_id, "msg_type": msg.msg_type}
+        worker_relaunched = False
+        if (
+            msg_type in {"instruction", "input", "redirect"}
+            and task.status in {"running", "paused", "needs_input", "pending"}
+            and self.worker_pool
+        ):
+            worker_relaunched = self._relaunch_worker_with_message(
+                task,
+                msg_type=msg_type,
+                content=content,
+                from_tier="orchestrator",
+            )
+
+        return {
+            "status": "sent",
+            "msg_id": msg.msg_id,
+            "msg_type": msg.msg_type,
+            "worker_relaunched": worker_relaunched,
+        }
 
     def _tool_tasks_clear_all(self, args: dict[str, Any]) -> dict:
         tm = self._require_task_manager()
@@ -2144,31 +2225,15 @@ class MCPProtocolHandler:
         if not msg:
             raise ValueError(f"Task not found: {args['task_id']}")
         task = tm.get(args["task_id"])
-        if task and self.worker_pool:
-            worker = self.worker_pool.get_worker(task.task_id)
-            worker_running = worker.is_running if worker else False
-            should_resume = task.completion_deferred or task.status in ("running", "paused", "needs_input")
-            if should_resume and not worker_running and task.auto_supervise:
-                on_worker_output, on_worker_complete = self._build_worker_callbacks(tm, self.worker_pool)
-                try:
-                    self.worker_pool.start_worker(
-                        task_id=task.task_id,
-                        prompt=(
-                            "CONTINUATION: You previously worked on this task and exited. "
-                            "The supervisor has sent you feedback. Check your inbox with "
-                            f"task_check_inbox and address any issues. Original task: {task.prompt[:2000]}"
-                        ),
-                        working_dir=task.working_dir,
-                        on_output=on_worker_output,
-                        on_complete=on_worker_complete,
-                    )
-                    tm.append_log(task.task_id, "\n--- WORKER RE-DISPATCHED (supervisor feedback pending) ---\n")
-                except RuntimeError:
-                    logger.warning(
-                        "Could not re-dispatch worker %s after supervisor input (already running?)",
-                        task.task_id,
-                    )
-        return {"status": "sent", "msg_id": msg.msg_id}
+        worker_relaunched = False
+        if task and task.status in {"running", "paused", "needs_input", "pending"} and self.worker_pool:
+            worker_relaunched = self._relaunch_worker_with_message(
+                task,
+                msg_type="instruction",
+                content=args["content"],
+                from_tier="supervisor",
+            )
+        return {"status": "sent", "msg_id": msg.msg_id, "worker_relaunched": worker_relaunched}
 
     @staticmethod
     def _clip_text(value: str, limit: int) -> str:

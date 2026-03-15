@@ -276,18 +276,15 @@ COpenClaw uses a **3-tier autonomous task architecture**:
 | Tier | Role | Session | Key Tools |
 |---|---|---|---|
 | **Orchestrator** | User-facing brain. Routes messages, proposes tasks | Persistent, resumes across restarts | `tasks_create`, `tasks_list`, `send_message`, `scheduled_tasks_schedule` |
-| **Worker** | Executes a task autonomously in a background thread | Per-task, isolated workspace | `task_report`, `task_check_inbox`, `task_set_status`, `task_get_context` |
+| **Worker** | Executes a task autonomously in a background thread | Per-task, isolated workspace | `task_report`, `task_set_status`, `task_get_context` |
 | **Supervisor** | Periodically checks on worker, intervenes if stuck | Per-task | `task_read_peer`, `task_send_input`, `task_report` |
 
 **Bidirectional ITC (Inter-Tier Communication):**
 
 ```
+     tasks_send / task_send_input
+              ──▶ stop+resume worker session with injected message prompt
                     ┌──────────────┐
-     tasks_send ──▶ │    INBOX     │ ──▶ task_check_inbox
-  (instruction,     │  (per task)  │     (worker reads)
-   input, pause,    └──────────────┘
-   resume, cancel,
-   redirect)        ┌──────────────┐
                     │   OUTBOX     │ ◀── task_report
   tasks_status ◀── │  (per task)  │     (progress, completed,
   tasks_logs   ◀── │  + timeline  │      failed, needs_input,
@@ -556,7 +553,7 @@ Or add to `~/.copilot/mcp-config.json`:
 | `tasks_list` | List tasks with status |
 | `tasks_status` | Detailed status with timeline |
 | `tasks_logs` | Raw worker session logs |
-| `tasks_send` | Send instruction/input/pause/resume/cancel to worker |
+| `tasks_send` | Send task message; instruction/input/redirect relaunch worker with resumed session context |
 | `tasks_cancel` | Cancel a running task |
 
 For `task_type="continuous_improvement"`, terminal iterations auto-chain by default: COpenClaw creates and dispatches the next iteration with mission handoff context and a rotated focus direction (`ux`, `reliability`, `performance`, `quality`, `safety`, `observability`, `docs`). Use continuous config keys `auto_chain_enabled`, `auto_chain_max_generations`, `auto_chain_failure_limit`, and `auto_chain_failure_backoff_seconds` to tune guardrails.
@@ -566,11 +563,11 @@ For `task_type="continuous_improvement"`, terminal iterations auto-chain by defa
 | Tool | Description |
 |---|---|
 | `task_report` | Report progress/completion/failure upward |
-| `task_check_inbox` | Check for instructions from orchestrator/supervisor |
+| `task_check_inbox` | Read queued downward messages (legacy compatibility / diagnostics) |
 | `task_set_status` | Update task status |
 | `task_get_context` | Read original task prompt + recent messages |
 | `task_read_peer` | Read worker logs (supervisor only) |
-| `task_send_input` | Send guidance to worker (supervisor only) |
+| `task_send_input` | Send supervisor guidance and relaunch worker with resumed session context |
 
 ---
 

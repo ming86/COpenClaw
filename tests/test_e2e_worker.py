@@ -5,7 +5,7 @@ needing the actual CLI installed. Tests cover:
 - Worker lifecycle (start, output streaming, completion, errors)
 - Supervisor lifecycle (start, periodic checks, completion detection)
 - Full task flow via MCPProtocolHandler (propose → approve → worker → supervisor)
-- Inter-session messaging (inbox/outbox, task_check_inbox, task_send_input)
+- Inter-session messaging (relaunch/resume delivery, outbox history)
 - Deferred completion (worker says done but supervisor verifies first)
 - Task cancellation
 """
@@ -159,7 +159,7 @@ class TestInstructionsFile:
         assert "duplicate code" in result
         assert "implementation quality" in result
         assert "meaningful tests" in result
-        assert "deep implementation" in result
+        assert "implementation depth" in result or "deep implementation" in result
 
 # ── Test: WorkerThread lifecycle ─────────────────────────────
 
@@ -1069,7 +1069,7 @@ class TestInterSessionMessaging:
         assert result["messages"] == []
 
     def test_supervisor_sends_input_to_worker(self, tmp_path):
-        """Supervisor sends input → worker reads it from inbox."""
+        """Supervisor input triggers worker relaunch and still records inbox history."""
         data_dir = str(tmp_path / "data")
         os.makedirs(data_dir)
         handler = self._make_handler(data_dir)
@@ -1077,12 +1077,16 @@ class TestInterSessionMessaging:
         task = handler.task_manager.create_task(name="ITC test", prompt="test")
         handler.task_manager.update_status(task.task_id, "running")
 
-        # Supervisor sends input to worker
-        send_result = self._call_tool(handler, "task_send_input", {
-            "task_id": task.task_id,
-            "content": "You need to add error handling to the main function",
-        })
+        with patch.object(handler.worker_pool, "start_worker") as mock_start_worker:
+            # Supervisor sends input to worker
+            send_result = self._call_tool(handler, "task_send_input", {
+                "task_id": task.task_id,
+                "content": "You need to add error handling to the main function",
+            })
         assert send_result["status"] == "sent"
+        assert send_result["worker_relaunched"] is True
+        assert mock_start_worker.call_count == 1
+        assert "error handling" in mock_start_worker.call_args.kwargs["prompt"]
 
         # Worker checks inbox
         inbox_result = self._call_tool(handler, "task_check_inbox", {"task_id": task.task_id})
@@ -1097,7 +1101,7 @@ class TestInterSessionMessaging:
         assert len(inbox_result2["messages"]) == 0
 
     def test_orchestrator_sends_instruction_to_worker(self, tmp_path):
-        """Orchestrator sends instruction → worker reads it."""
+        """Orchestrator instruction triggers worker relaunch with injected prompt context."""
         data_dir = str(tmp_path / "data")
         os.makedirs(data_dir)
         handler = self._make_handler(data_dir)
@@ -1105,13 +1109,17 @@ class TestInterSessionMessaging:
         task = handler.task_manager.create_task(name="Orch msg test", prompt="test")
         handler.task_manager.update_status(task.task_id, "running")
 
-        # Orchestrator sends instruction
-        send_result = self._call_tool(handler, "tasks_send", {
-            "task_id": task.task_id,
-            "msg_type": "instruction",
-            "content": "Please also add a README",
-        })
+        with patch.object(handler.worker_pool, "start_worker") as mock_start_worker:
+            # Orchestrator sends instruction
+            send_result = self._call_tool(handler, "tasks_send", {
+                "task_id": task.task_id,
+                "msg_type": "instruction",
+                "content": "Please also add a README",
+            })
         assert send_result["status"] == "sent"
+        assert send_result["worker_relaunched"] is True
+        assert mock_start_worker.call_count == 1
+        assert "README" in mock_start_worker.call_args.kwargs["prompt"]
 
         # Worker checks inbox
         inbox_result = self._call_tool(handler, "task_check_inbox", {"task_id": task.task_id})
@@ -1774,8 +1782,8 @@ class TestWorkerInstructionsUpdated:
             prompt="test prompt",
             workspace_root="/tmp/workspace",
         )
-        assert "wait loop" in result.lower() or "wait loop" in result
-        assert "task_check_inbox" in result
+        assert "relaunch" in result.lower()
+        assert "task_check_inbox" not in result
 
 # ── Test: Stuck-detection and auto-finalization ──────────────
 

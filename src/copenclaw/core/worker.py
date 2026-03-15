@@ -1038,6 +1038,26 @@ class WorkerPool:
             if task_id in self._supervisors:
                 self._supervisors[task_id].stop()
 
+    def stop_worker(self, task_id: str, wait_seconds: float = 5.0) -> None:
+        """Stop only the worker for a task and wait briefly for thread exit."""
+        worker: Optional[WorkerThread] = None
+        with self._lock:
+            worker = self._workers.get(task_id)
+            if worker:
+                worker.stop()
+        if not worker:
+            return
+        deadline = time.monotonic() + max(wait_seconds, 0.0)
+        while worker.is_running and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+    def stop_supervisor(self, task_id: str) -> None:
+        """Stop only the supervisor for a task."""
+        with self._lock:
+            supervisor = self._supervisors.get(task_id)
+            if supervisor:
+                supervisor.stop()
+
     def stop_all(self) -> None:
         """Stop all workers and supervisors."""
         with self._lock:

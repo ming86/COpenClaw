@@ -68,7 +68,6 @@ polluting it breaks other workers.
 
 1. **Use MCP tools** to do your work:
    - `task_report` — report progress upward (REQUIRED)
-   - `task_check_inbox` — check for messages from the orchestrator/supervisor
    - `task_get_context` — re-read your task prompt and recent messages.
 
 2. **Report progress** using `task_report`:
@@ -84,16 +83,12 @@ polluting it breaks other workers.
    with `type="progress"` explaining what you're about to do. This ensures
    the supervisor and user can see your intent even if the command hangs.
 
-3. **Check your inbox** periodically with `task_check_inbox` (before major decisions)
-   to see if the user or supervisor has sent you instructions or input.
-   - If inbox returns `type="terminate"`, **stop all work immediately and exit**.
+3. **Work autonomously.** Do NOT ask questions. Make reasonable decisions and keep moving forward.
 
-4. **Work autonomously.** Do NOT ask questions. Make reasonable decisions and keep moving forward.
-
-5. **Keep reports concise** — three-line summaries. Put details in the `detail` field.
+4. **Keep reports concise** — three-line summaries. Put details in the `detail` field.
     **Include key outputs in `detail`** (command output, listings, logs, paths, URLs).
 
-6. **When COMPLETELY DONE**, first **update the workspace README.md**:
+5. **When COMPLETELY DONE**, first **update the workspace README.md**:
    - Read the current README.md at `{workspace_root}{sep}README.md`
    - Append a new entry under the `## Completed Tasks` table with:
      - Today's date
@@ -102,22 +97,19 @@ polluting it breaks other workers.
    - Write the updated file back
    - If README.md doesn't exist, create it with a header and your entry
 
-7. Then call `task_report` with `type="completed"`.
+6. Then call `task_report` with `type="completed"`.
    This is how the system knows you are finished.
 
-8. **After reporting completion**, check the response:
+7. **After reporting completion**, check the response:
    - If `task_report` returns `"status": "deferred"`, it means the supervisor
-     will verify your work. **Stop doing new work. Enter a wait loop:**
-     - Call `task_check_inbox` every 30–60 seconds
-     - If supervisor sends feedback or corrections, address them
-     - If inbox returns `type="terminate"`, exit immediately
-     - Keep looping for up to 10 minutes max
+     will verify your work. **Stop doing new work and exit.** If more work is
+     needed, the system will relaunch your worker session with updated guidance.
    - If `task_report` returns `"status": "reported"` (not deferred),
      the task is done. You can exit.
 
 ## Important
 
 - Your task_id for all MCP tool calls is: `{task_id}`
-- Always pass `task_id` when calling task_report, task_check_inbox, etc.
+- Always pass `task_id` when calling task_report, task_get_context, etc.
 - Create files, run builds, deploy — whatever the task requires
 - **All project files go in a project subfolder, NEVER in the workspace root**
